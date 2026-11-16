@@ -81,6 +81,8 @@ def _get(url, tok, accept="application/vnd.github+json", timeout=30):
     try:
         return urllib.request.urlopen(rq, timeout=timeout, context=_ssl())
     except urllib.error.HTTPError as e:
+        if tok and e.code in (401, 403):             # (an expired token, or one for the old private repository: the
+            return _get(url, "", accept, timeout)    # public one needs none, 2026-11-16)
         if e.code in (401, 403, 404):
             raise UpdateError(f"GitHub refused ({e.code}): " + ("the token in update_token_file (or FLAKEID_GITHUB_TOKEN) has expired "
                               "or cannot read the repository" if tok else "the repository is private or not found: put a token "
@@ -110,6 +112,18 @@ def latest(s):
     tok = token(s)                                   # (none: fine for a public repository)
     c = _json(f"repos/{s.update_repo}/commits/{s.update_branch}", tok)
     return dict(sha=c["sha"], date=c["commit"]["committer"]["date"], message=c["commit"]["message"].split("\n")[0])
+
+
+CHECK_EVERY_S = 30 * 60                              # the scan window asks GitHub at the start and then this often
+
+
+def available(s, root=ROOT):
+    """The start-up and every-30-minutes check (TkUI.watch_updates): the newest commit of update_branch when it is not
+    the installed one, else None (also for a git checkout, which git updates).  Raises UpdateError."""
+    if (Path(root) / ".git").exists():
+        return None
+    new = latest(s)
+    return None if installed(root).get("sha") == new["sha"] else new
 
 
 def news(s, have, new):

@@ -621,12 +621,76 @@ class TkUI:
             ev.wait()
         return box.get("r")
 
+    # ---- "Update available" (2026-11-16)
+    UPDATE_BG, UPDATE_FG = "#ffb02e", "#1a1a1a"
+
+    def watch_updates(self, s):
+        """Is there a newer version on GitHub?  Asked at the start and every update.CHECK_EVERY_S (30 min) after, in a
+        background thread; while there is one, a banner at the top of the main window and of the start screen.  A check
+        that fails (no network) changes nothing."""
+        from . import update as U
+        self.update_new = None
+
+        def loop():
+            while True:
+                try:
+                    new = U.available(s)
+                    self._post(lambda n=new: self._set_update(n))
+                except Exception as e:
+                    print(f"(update check: {type(e).__name__}: {e})", flush=True)
+                time.sleep(U.CHECK_EVERY_S)
+        threading.Thread(target=loop, name="update watch", daemon=True).start()
+
+    def _update_text(self):
+        n = getattr(self, "update_new", None) or {}
+        return f"Update available ({str(n.get('date', ''))[:10]}): please update"
+
+    def _set_update(self, new):
+        self.update_new = new
+        bar = getattr(self, "_upd_bar", None)
+        if new and bar is None and getattr(self, "_main_top", None) is not None:
+            bar = self._upd_bar = tk.Label(self.root, bg=self.UPDATE_BG, fg=self.UPDATE_FG, font=("Segoe UI", 11, "bold"),
+                                           anchor="w", padx=10, pady=5)
+            bar.pack(fill="x", before=self._main_top)
+        if bar is not None:
+            if new:
+                bar.configure(text=self._update_text() + " (Update... on the start screen)")
+            else:
+                bar.destroy()
+                self._upd_bar = None
+        w = getattr(self, "_start_win", None)
+        if w is not None and getattr(w, "upd_sync", None):
+            w.upd_sync()
+
+    def _start_update_bar(self, w, below, open_update):
+        """The banner at the top of the start screen (w), above its frame `below`; its Update... opens the update window."""
+        st = {"bar": None}
+
+        def sync():
+            if not w.winfo_exists():
+                return
+            if getattr(self, "update_new", None):
+                if st["bar"] is None:
+                    st["bar"] = tk.Frame(w, bg=self.UPDATE_BG)
+                    st["lab"] = tk.Label(st["bar"], bg=self.UPDATE_BG, fg=self.UPDATE_FG, font=("Segoe UI", 11, "bold"),
+                                         anchor="w", padx=10, pady=6)
+                    st["lab"].pack(side="left", fill="x", expand=True)
+                    ttk.Button(st["bar"], text="Update...", command=open_update).pack(side="right", padx=8, pady=4)
+                    st["bar"].pack(fill="x", before=below)
+                st["lab"].configure(text=self._update_text())
+            elif st["bar"] is not None:
+                st["bar"].destroy()
+                st["bar"] = None
+        w.upd_sync = sync
+        sync()
+
     # ---- main window
     def _build_main(self):
         from tkinter import scrolledtext
         r = self.root
         top = ttk.Frame(r)
         top.pack(fill="x", padx=8, pady=(8, 4))
+        self._main_top = top
         try:
             self._logo = tk.PhotoImage(master=r, file=str(ASSETS / "logo_32.png"))
             ttk.Label(top, image=self._logo).pack(side="left", padx=(0, 8))
@@ -1462,6 +1526,7 @@ class TkUI:
             ttk.Button(lb, text="Live view...", width=14, command=open_live).pack(side="left")
             ttk.Label(lb, text=f"  (exposure {s0.exposure_ms:g} ms, as the 10x scan)", foreground="#9a96b8").pack(side="left")
             ttk.Button(lb, text="Update...", width=10, command=lambda: (close_live(), self.update_window(scanner, w))).pack(side="left", padx=(16, 0))
+            self._start_update_bar(w, f, lambda: (close_live(), self.update_window(scanner, w)))
             b = ttk.Frame(f)
             b.grid(row=37, column=2, sticky="e", pady=(12, 0))
             ttk.Button(b, text="Start", style="Accent.TButton", width=10, command=ok).pack(side="left", padx=6)
@@ -1539,6 +1604,7 @@ class TkUI:
                 say(f"\nUPDATE NOT DONE: {err}")
                 return
             scanner.say(f"program updated to {info['sha'][:7]} ({info['date']}): {info['message']}")
+            self._set_update(None)
             say("\nThe update is installed.")
             if messagebox.askyesno("Update installed", f"Installed {info['sha'][:7]}: {info['message']}\n\nRestart the program "
                                    "now?  (No: the new version is used from the next start.)", parent=w):

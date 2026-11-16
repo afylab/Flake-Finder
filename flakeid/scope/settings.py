@@ -44,18 +44,17 @@ class Settings:
                                             # the pass before (their common shift taken off; 2026-11-02: was every flake within 3 um)
     remeasure_agree_frac: float = 0.5       # ... the share of the flakes (found in either pass) that must agree
     remeasure_max_passes: int = 8           # ... 100x passes at most: then failed, with a report (2026-10-30e: was 6, then asked)
-    coord_check: bool = True                # after the 100x imaging: every 100x picture again (its position and focus) until
-                                            # two passes agree; the positions go with the results (Scanner.coord_check)
-    coord_check_agree_um: float = 5.0       # ... two passes agree: more than coord_check_agree_frac of the flakes within
-                                            # this of the pass before (common shift off; 2026-11-01: was every flake
-                                            # within 3 um); a flake this far from where its picture was taken: flagged
-    coord_check_agree_frac: float = 0.5     # ... the share of the flakes (found in either pass) that must agree
-    coord_check_refocus_every: int = 60     # ... the 100x focus drifts: an autofocus on the first flake of every pass and
-                                            # then every this many flakes; its change from the focus the picture was
+    coord_check: bool = True                # after the 100x imaging: the run's first (focused) 100x picture visited again and
+                                            # its offset from where it was taken reported (Scanner.first_flake_check;
+                                            # 2026-11-16: replaces the passes over every picture; nothing is moved)
+    coord_check_agree_um: float = 5.0       # ... an offset over this is flagged
+    coord_check_agree_frac: float = 0.5     # (not used since 2026-11-16, kept so older settings files still load)
+    coord_check_refocus_every: int = 60     # the remeasure: the 100x focus drifts: an autofocus on the first flake of every
+                                            # pass and then every this many flakes; its change from the focus the picture was
                                             # taken at is added to the following flakes' focus (0: off; 2026-11-01)
     coord_check_refocus_max_um: float = 10.0  # ... an autofocus further than this from the prediction is not used (a
                                             # wrong peak)
-    coord_check_max_passes: int = 8         # ... at most; then flagged, a report, the positions not changed
+    coord_check_max_passes: int = 8         # (not used since 2026-11-16, kept so older settings files still load)
     remeasure_focus: str = "autofocus"      # ... (2026-11-02: always autofocus, the focus drifts; "previous", each flake at its
                                             # old 100x focus without autofocus, was removed and is ignored)
     remeasure_refocus_um: float = 5.0       # ... no autofocus: the old focus; plus the chips' change in height when the two
@@ -505,13 +504,13 @@ class Settings:
 SCAN_PROFILES = {
     "current": dict(
         label="Current settings",
-        hint="100 targets per cm\u00b2 by default, every target imaged at 100x, then the coordinate check (every 100x picture "
-             "found again until two passes agree)",
+        hint="100 targets per cm\u00b2 by default, every target imaged at 100x, then the first-flake check (the run's first "
+             "100x picture found again: its offset reported)",
         settings={}),
     "jordan_oct20": dict(
         label="Jordan's original (as of 2026-10-20)",
         hint="25 targets per cm\u00b2 (at most 400 a piece); hBN: the 48 of each piece's targets with the largest best "
-             "terrace imaged; no coordinate check; Standard targets, no thin hBN search.  As the current settings: 3 flakes "
+             "terrace imaged; no first-flake check; Standard targets, no thin hBN search.  As the current settings: 3 flakes "
              "in a row not found at 100x ask the operator, retakes search harder",
         settings=dict(targets_per_cm2=25.0, targets_max_piece=400, hbn_imaged_per_cm2=None, hbn_max_targets=48,
                       coord_check=False, target_mode="standard", thin_hbn_targets=0)),
