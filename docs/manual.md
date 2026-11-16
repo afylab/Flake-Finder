@@ -426,8 +426,8 @@ python -m flakeid.live "<scan folder>/chipA_tiles" hbn 285 --flat flat_10x.npz -
 * **Remeasured coordinates.** For chips that moved after their run (knocked, taken off and put back, before the
   AFM), the scan program's *Remeasure flake coordinates* job finds the flakes again at the microscope and changes
   the old run's results in place (viewer, tables, target lists, `.pos`, 100x regions and mosaics, AFM centres),
-  saving every changed file first to `<run>/old_coords/<time>/`. Its main scan also runs a coordinate check that
-  re-finds every 100x picture before the results are copied. See
+  saving every changed file first to `<run>/old_coords/<time>/`. After the 100x imaging, the main scan finds the run's
+  first 100x picture again and reports its offset (the first-flake check). See
   [scan_guide.md](scan_guide.md#remeasure-flake-coordinates).
 * `--then-batch` additionally runs the full-mosaic analysis (`find_flakes --viewer --json`), only needed to
   compare with the batch analysis. The batch analysis ranks flakes independently,

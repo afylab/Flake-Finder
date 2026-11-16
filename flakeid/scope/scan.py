@@ -31,7 +31,7 @@ import numpy as np
 from .settings import Settings, dump
 from flakeid.fieldmosaic import field_size_um, fmt_matrix, format_poly, parse_poly, plan_fields
 
-VERSION = "py-2026-11-15a"
+VERSION = "py-2026-11-16a"
 NAN = float("nan")
 MANUAL_RETAKE = "Manual focus (retakes)"       # the 100x window's button: a retake focused by hand
 IDX100_HEADER = ("order,label,stage_x_um,stage_y_um,z_um,z_drive,z10_um,offset_um,focus,af_ratio,saturated_frac,file,shift_files,"
@@ -830,8 +830,7 @@ class Scanner:
         self.z_shift = 0.0                               # (the focus moved during a pause: added to every Z sent; pause_now)
         self.last_af = {}                                # objective is 100x -> (x, y, z) of the last focus found (pause_now)
         self.last_pic = None                             # the last tile / focused 100x picture: frame, x, y, z (pause check)
-        self.coord_refs = {}                             # each 100x picture of the run: its position, focus, a grey copy (coord_check)
-        self.coord_plan = None                           # ... the positions the coordinate check agreed on (apply_coord_check)
+        self.coord_refs = {}                             # the run's first (focused) 100x picture: position, focus, a grey copy (first_flake_check)
         self.contact = {}                                # who runs the job (contact_of): the pause check's message
         self.n_snaps = 0
         self.move_box = None
@@ -2647,7 +2646,7 @@ class Scanner:
                           + (f"{float(s.hbn_imaged_per_cm2):g} per cm2 of them imaged" if s.hbn_imaged_per_cm2 else
                              f"the {int(s.hbn_max_targets)} with the largest best terrace imaged per piece"
                              if s.hbn_imaged_per_cm2 is None and int(s.hbn_max_targets or 0) > 0 else "all imaged")
-                          + ("; coordinate check after the 100x imaging" if s.coord_check else "; no coordinate check")))
+                          + ("; first-flake check after the 100x imaging" if s.coord_check else "; no first-flake check")))
                 self.say(f"  scan profile: {getattr(s, 'scan_profile', 'current')}")
             if s.mode == "flat":
                 s.flat_objective, s.flat_oxide_nm, s.flat_frames = r["objective"], r["oxide"], r["frames"]
@@ -2761,13 +2760,12 @@ class Scanner:
         jobs = self.targets_jobs()
         self.image_targets(jobs)
         try:
-            self.coord_check()
+            self.first_flake_check()
         except Stop:
             raise
-        except Exception as e:                          # (a check: the job goes on, the positions as the pictures were taken)
+        except Exception as e:                          # (a check: the job goes on; nothing is moved by it anyway)
             import traceback
-            self.say(f"  WARNING: the coordinate check failed ({type(e).__name__}: {e}); nothing changed: the positions are where "
-                     "the pictures were taken")
+            self.say(f"  WARNING: the first-flake check failed ({type(e).__name__}: {e})")
             self.say(traceback.format_exc())
         self.image_domains()
         self.remeasure_visit()                          # (remeasure flake coordinates: each flake visited)
@@ -3309,7 +3307,6 @@ class Scanner:
             nb = copy_parallel(todo, progress=prog)
             for nm, vfile in viewers.items():
                 write_viewer_link(dst / nm / f"{nm} viewer.html", vfile)
-            self.apply_coord_check(dst)                  # (before the designer is told: it builds the moved ones)
             if not s.scan10_only:                        # (a 10x scan only, without 100x pictures: not for the designer)
                 write_copy_done(dst, names, rebuild=False)
             self.uploaded_to = dst                       # (chip notes saved after this are copied there by themselves)
@@ -3493,7 +3490,7 @@ class Scanner:
         removed): each flake autofocused at 10x and in pass A1, from its old focus (plus the chips' change in height
         when the two spots show one over remeasure_refocus_um); later passes at the focus A1 found plus the drift: an
         autofocus on the first flake of every pass and every coord_check_refocus_every (60) flakes, its change used
-        for the flakes that follow (as the coordinate check).  The flakes: all imaged at 100x, the kept ones, a list,
+        for the flakes that follow.  The flakes: all imaged at 100x, the kept ones, a list,
         or remeasure_random_n at random (the first and last imaged always among them).  After remeasure_max_passes (8)
         without two agreeing: failed, the run not changed, a report (remeasure.report_failed)."""
         import cv2
@@ -5549,9 +5546,12 @@ class Scanner:
         return Path(getattr(self, "run_dir", None) or self.s.out_dir), label
 
     def coord_ref(self, im, fn, lab, x, y, z, how):
-        """A 100x picture just taken, kept for the coordinate check: its stage position, its focus and a grey copy
-        (half resolution JPEG in <run>_coord_check/refs/: the TIFF may be gone by then)."""
+        """A 100x picture just taken, kept for the first-flake check if it is the run's first focused one (else its very
+        first): its stage position, its focus and a grey copy (half resolution JPEG in <run>_coord_check/refs/: the
+        TIFF may be gone by then)."""
         import cv2
+        if self.coord_refs and (how not in ("auto", "manual") or any(r["focus"] in ("auto", "manual") for r in self.coord_refs.values())):
+            return                                      # (the first-flake check needs one: the first focused, else the first)
         try:
             rd, label = self.coord_dir()
             d = rd / f"{label}_coord_check" / "refs"
@@ -5561,12 +5561,13 @@ class Scanner:
             f = d / (Path(fn).stem + ".jpg")
             cv2.imwrite(str(f), g8, [cv2.IMWRITE_JPEG_QUALITY, 92])
             m = re.search(r"F0*(\d+)", lab)
+            self.coord_refs.clear()                      # (a focused one replaces a first one that was not focused)
             self.coord_refs[(self.s.name, Path(fn).stem)] = dict(
                 piece=self.s.name, label=lab, stem=Path(fn).stem, flake_id=int(m.group(1)) if m else len(self.coord_refs) + 1,
                 x=float(x), y=float(y), z=float(z), focus=how, picture=str(f), um_px=float(np.sqrt(abs(np.linalg.det(np.asarray(Mf, float))))) / 9.54,
                 frame_wh=[g8.shape[1], g8.shape[0]], t=time.time())
         except Exception as e:
-            self.say(f"    (not kept for the coordinate check: {type(e).__name__}: {e})")
+            self.say(f"    (not kept for the first-flake check: {type(e).__name__}: {e})")
 
     def remeasure_movies(self, wd, old, allv):
         """The remeasure's movies (A1 - where the 10x find put each flake, A2 - A1, ...) in its folder and in the old
@@ -5586,13 +5587,6 @@ class Scanner:
         except OSError as e:
             self.say(f"  (movies not copied to the old run: {e})")
         return mv
-
-    def coord_movies(self, wd, label, refs, orig):
-        """The coordinate check's movies (offsetmovie: A1 - where the pictures were taken, A2 - A1, ...; the pass
-        visiting order) in its folder; never raises."""
-        from . import offsetmovie as OMV
-        fl = [dict(name=v.get("name") or v.get("stem"), ref=orig.get(v["key"]), A=list(v.get("A_all", v["A"]))) for v in refs]
-        return OMV.make_movies(wd, label, fl, ref_name="100x picture", log=self.say)
 
     def a1_first(self, vis, ref, tol, where):
         """What pass A1's first flake says (vis: in A1's order, ref: {key: its A0 position}): found how far from its
@@ -5631,257 +5625,71 @@ class Scanner:
         except Exception:
             pass
 
-    def coord_check(self):
-        """The coordinate check after the 100x imaging (2026-10-30e): every 100x picture of the run is visited again,
-        at the stage position and the focus it was taken at (no autofocus: nothing changed), and found in a new frame
-        (find100: here, else a stitched 3 x 3 mosaic; never by hand): pass A1; then A2, A3, ... from the positions just
-        found (the focus: each picture's + the drift measured by an autofocus on the first flake of every pass and every
-        coord_check_refocus_every flakes after it), until two passes in a row agree: more than coord_check_agree_frac (half) of the flakes within
-        coord_check_agree_um (5 um) of the pass before (their common shift taken off; 2026-11-01: was every flake within
-        3 um), at most coord_check_max_passes (8).  The flakes that do not agree (or were not found in both passes) get
-        where their pictures were taken + the median move of the ones that agree.  "Stop coordinate check" (a window) ends it: the last complete
-        pass is used (none: the positions the pictures were taken at, nothing changes).  The positions used go into the
-        results on the share after the copy (apply_coord_check: each flake moved to where it was found, as the
-        remeasure).  8 passes without agreement: flagged, a report (remeasure.report_failed), nothing changes.  Written
-        either way: <run>_coord_check/coord_check.json and coord_check_passes.csv (copied to the share with the run; not
-        <run>_*.json beside the run file: "*_run_*.json" is how the run file is found); a message says the
-        largest offset from where the pictures were taken (over coord_check_agree_um: flagged)."""
-        from . import remeasure as RMM
-        s, c = self.s, self.core
+    def first_flake_check(self):
+        """After the 100x imaging (py-2026-11-16a; it replaces the coordinate check's passes over every picture): the
+        run's first 100x picture (its first focused one, else its very first: coord_ref) is visited again at the stage
+        position and focus it was taken at and found in a new frame (find100: here, else a 3 x 3 mosaic, else once more
+        after an autofocus; never by hand).  Its offset from where the picture was taken is reported (log, message, Slack
+        / email): over coord_check_agree_um it is flagged.  Nothing is moved.  Written: <run>_coord_check/coord_check.json."""
+        s = self.s
         refs = list(self.coord_refs.values())
         if not s.coord_check or not refs or self.stop_all:
             return
+        v = dict(refs[0])
         rd, label = self.coord_dir()
         wd = rd / f"{label}_coord_check"
-        self.set_phase("coordinate check")
+        self.set_phase("first-flake check")
+        mins = (time.time() - v["t"]) / 60.0
+        v["key"], v["A"], v["name"] = (v["piece"], v["flake_id"], v["stem"]), [], f"{v['piece']} {v['label']}"
         self.say("")
-        self.say(f"==== coordinate check: the {len(refs)} 100x pictures of this run again, at their own position and focus, until "
-                 f"two passes agree (more than {s.coord_check_agree_frac:.0%} of the flakes within {f1(s.coord_check_agree_um)} um)")
-        refs = self.in_short_order(refs, lambda v: (v["x"], v["y"]), "coordinate check pictures")
-        # the moves allowed: around all the pictures (not max_travel_um from the "start", which each piece's 100x imaging
-        # resets to where the stage is: graph010__run_9 2026-11-01, the check went from the last piece back to the first,
-        # 30.4 mm away, and the refused move ended the job)
-        Q = np.array([(v["x"], v["y"]) for v in refs], float)
-        mg = 1500.0
-        box0, self.move_box = self.move_box, (Q[:, 0].min() - mg, Q[:, 0].max() + mg, Q[:, 1].min() - mg, Q[:, 1].max() + mg)
-        for v in refs:
-            v["key"], v["A"], v["name"] = (v["piece"], v["flake_id"], v["stem"]), [], f"{v['piece']} {v['label']}"
-        orig = {v["key"]: np.array([v["x"], v["y"]]) for v in refs}
-        ctl = self.ui.control(self, "Coordinate check", f"Coordinate check: the {len(refs)} 100x pictures of this run are visited "
-                              "again until two passes agree.\n\n\"Stop coordinate check\" ends it: the last complete pass is used "
-                              "(none yet: the positions the pictures were taken at).", ("Stop coordinate check",))
-        passes, cmps, agreed, stopped, k, t0 = [], [], None, False, 0, time.time()
-        dz, refocus_log, n_ref = 0.0, [], int(s.coord_check_refocus_every or 0)     # (the focus drift: refocus())
-        match_log = []                                    # (per pass: coordinates match, the flakes near their 100x picture)
+        self.say(f"==== first-flake check: {v['name']} (the run's first {'focused ' if v['focus'] in ('auto', 'manual') else ''}"
+                 f"100x picture, {mins:.0f} min ago) again, at its own position and focus")
+        q = np.array([v["x"], v["y"]], float)
+        box0 = self.move_box
+        self.move_box = (q[0] - 1500.0, q[0] + 1500.0, q[1] - 1500.0, q[1] + 1500.0)
+        a = None
         try:
-            while k < max(2, int(s.coord_check_max_passes)):
-                k += 1
-                self.set_phase(f"coordinate check: pass {k}")
-                self.say(f"  pass A{k} ...")
-                cur, t_p, live = {}, time.time(), ""
-                prev = passes[-1] if passes else None
-                due = n_ref > 0                                   # (the first flake of every pass, then every n_ref)
-                for i, v in enumerate(refs if k % 2 else refs[::-1]):     # (back and forth along the path)
-                    if ctl is not None and ctl.value() == "Stop coordinate check":
-                        stopped = True
-                        break
-                    self.stop_check()
-                    self.ui.progress(self, f"coordinate check: pass A{k}, picture {i + 1} of {len(refs)}{live}")
-                    last = next((a for a in reversed(v["A"]) if a is not None), None)
-                    q = last if last is not None else orig[v["key"]]
-                    try:
-                        self.approach_to(float(q[0]), float(q[1]))
-                    except StageLimit:
-                        v["A"].append(None)
-                        continue
-                    if n_ref > 0 and i > 0 and i % n_ref == 0:
-                        due = True
-                    if self.has_z and due:
-                        # the 100x focus drifts slowly: an autofocus here, around the focus predicted (the picture's +
-                        # the drift so far); its change from the picture's focus is used for the flakes that follow
-                        due = False
-                        zp = v["z"] + dz
-                        self.set_z(zp)
-                        af = self.autofocus(zp, s.af100_first)
-                        if af[2] and abs(af[0] - zp) <= s.coord_check_refocus_max_um:
-                            dz = float(af[0]) - float(v["z"])
-                            self.say(f"    focus: {v['name']}: autofocused {f2(af[0] - zp)} um from the prediction; the focus "
-                                     f"is now {f2(dz)} um from where the pictures were taken (A{k}, picture {i + 1})")
-                        else:
-                            self.say(f"    focus: {v['name']}: autofocus " + (f"{f2(af[0] - zp)} um from the prediction (over "
-                                     f"{f1(s.coord_check_refocus_max_um)} um: a wrong peak?)" if af[2] else "found no focus")
-                                     + f": not used, still {f2(dz)} um")
-                        refocus_log.append(dict(passn=k, picture=i + 1, stem=v["stem"], ok=bool(af[2]), focus_shift_um=round(dz, 3)))
-                    if self.has_z:
-                        self.set_z(v["z"] + dz)
-                    a = self.find100(v, None, q, k, wd, by_hand=False, autofocus=False)
-                    v["A"].append(a)
-                    if a is not None:
-                        cur[v["key"]] = a
-                    # so far in this pass (the progress line): A1 found / not found; from A2 on, against the pass
-                    # before with the shift shared so far taken off: within coord_check_agree_um / not (or not found)
-                    n_done = i + 1
-                    # (coordinates match: found within coord_check_agree_um of where its 100x picture was taken, no
-                    # shift taken off: the 100x imaging's stage positions were right; 2026-11-02)
-                    n_match = sum(1 for q_, p_ in cur.items() if np.hypot(*(np.asarray(p_, float) - orig[q_])) <= s.coord_check_agree_um)
-                    if prev is None:
-                        live = f"  -  so far {len(cur)} found, {n_done - len(cur)} not found"
-                    else:
-                        both = [q_ for q_ in cur if q_ in prev]
-                        n_ok = 0
-                        if both:
-                            Dq = np.array([np.asarray(cur[q_], float) - np.asarray(prev[q_], float) for q_ in both])
-                            n_ok = int((np.hypot(*(Dq - np.median(Dq, axis=0)).T) <= s.coord_check_agree_um).sum())
-                        live = (f"  -  so far {n_ok} passed, {n_done - n_ok} failed (within {f1(s.coord_check_agree_um)} um of "
-                                f"A{k - 1}; needed: more than {s.coord_check_agree_frac:.0%} of all)")
-                    live += f";  coordinates match: {n_match} (within {f1(s.coord_check_agree_um)} um of the 100x pictures)"
-                if stopped:
-                    self.say(f"  stopped by the operator during pass A{k} ({'no complete pass: the positions the pictures were taken at' if k == 1 else f'pass A{k - 1} is used'})")
-                    for v in refs:
-                        v["A_all"] = list(v["A"])              # (the movie shows the pass cut short too)
-                        del v["A"][k - 1:]
-                    break
-                passes.append(cur)
-                n_match = sum(1 for q_, p_ in cur.items() if np.hypot(*(np.asarray(p_, float) - orig[q_])) <= s.coord_check_agree_um)
-                self.say(f"  pass A{k}: {len(cur)} of {len(refs)} found ({time.time() - t_p:.0f} s); coordinates match: {n_match} of "
-                         f"{len(refs)} within {f1(s.coord_check_agree_um)} um of where their 100x pictures were taken")
-                match_log.append(n_match)
-                if k >= 2:
-                    cmp = RMM.compare_passes(passes[-2], cur, s.coord_check_agree_um, s.coord_check_agree_frac)
-                    cmps.append(cmp)
-                    w = cmp["worst"]
-                    self.say(f"  A{k} against A{k - 1}: {cmp['common']} in both, common shift {f2(cmp['shift'][0])}, {f2(cmp['shift'][1])} um; "
-                             + (f"the largest difference {f2(cmp['max_um'])} um ({w[0]} {w[2]})" if w else "none")
-                             + f"; {len(cmp['within'])} of {cmp['total']} within {f1(s.coord_check_agree_um)} um")
-                    if cmp["ok"]:
-                        agreed = cmp
-                        # the flakes that did not agree (or were not found in both passes): where their pictures were
-                        # taken + the median move of the ones that agree (robust: a rigid fit to them is pulled by one
-                        # with a move of its own, e.g. a picture taken before a slip)
-                        med = np.median(np.array([np.asarray(cur[q], float) - orig[q] for q in cmp["within"]]), axis=0)
-                        out = sorted((q for q in orig if q not in cmp["within"]), key=str)
-                        self.say(f"  passes A{k - 1} and A{k} agree ({len(cmp['within'])} of {cmp['total']} flakes within "
-                                 f"{f1(s.coord_check_agree_um)} um): the coordinates are A{k}'s"
-                                 + (f"; {len(out)} flakes that did not agree (or were not found in both passes) move by the median "
-                                    f"move of the others ({f2(med[0])}, {f2(med[1])} um): " + ", ".join(f"{q[0]} {q[2]}" for q in out[:20])
-                                    + (" ..." if len(out) > 20 else "") if out else ""))
-                        cur = {q: (np.asarray(cur[q], float) if q in cmp["within"] else orig[q] + med) for q in orig}
-                        passes[-1] = cur
-                        break
-        except BaseException as e:
-            if k == 1:                                    # (cut short in A1: was its first flake where it should be?)
-                self.a1_interrupted("coordinate check", label, refs, orig, s.coord_check_agree_um,
-                                    "where its 100x picture was taken", e)
-            self.coord_movies(wd, label, refs, orig)
-            raise
+            self.ui.progress(self, f"first-flake check: {v['name']}")
+            self.approach_to(float(q[0]), float(q[1]))
+            if self.has_z:
+                self.set_z(v["z"])
+            a = self.find100(v, None, q, 1, wd, by_hand=False, autofocus=True)
+        except StageLimit as e:
+            self.say(f"  (the stage cannot go there: {e})")
         finally:
             self.move_box = box0
-            if ctl is not None:
-                ctl.close()
-        # what is used: the agreed pass; stopped: the last complete one; not agreeing after the last pass: nothing
-        use = passes[-1] if passes and (agreed is not None or stopped) else None
-        fail = agreed is None and not stopped
-        res = dict(run=label, time=time.strftime("%Y-%m-%d %H:%M:%S"), pictures=len(refs), passes=len(passes), stopped=stopped,
-                   agreed=agreed is not None, tol_um=s.coord_check_agree_um, agree_frac=s.coord_check_agree_frac,
-                   flakes_agreeing=len(agreed["within"]) if agreed else None, refocus=refocus_log,
-                   coordinates_match=match_log, program=VERSION, minutes=round((time.time() - t0) / 60, 1),
-                   passes_compared=[dict(shift_um=[round(x, 2) for x in c_["shift"]], max_um=round(c_["max_um"], 2), common=c_["common"])
-                                    for c_ in cmps])
-        if use:
-            d = np.array([use[k_] - orig[k_] for k_ in use])
-            n = np.hypot(*d.T)
-            wi = int(np.argmax(n))
-            wk = list(use)[wi]
-            first = refs[0]["key"]
-            res.update(applied=True, flakes_moved=len(use), offset_median_um=[round(float(x), 2) for x in np.median(d, 0)],
-                       offset_max_um=round(float(n.max()), 2), offset_max_at=f"{wk[0]} {wk[2]}",
-                       first_picture=dict(stem=first[2], offset_um=[round(float(x), 2) for x in (use[first] - orig[first])])
-                       if first in use else None, ok=bool(n.max() <= s.coord_check_agree_um))
-            self.coord_plan = dict(positions={(k_[0], k_[2]): np.asarray(p_, float) for k_, p_ in use.items()}, note=res)
-            how = (f"passes A{len(passes) - 1} and A{len(passes)} agree: {len(agreed['within'])} of {agreed['total']} flakes "
-                   f"within {f1(s.coord_check_agree_um)} um" if agreed
-                   else f"stopped: pass A{len(passes)} used")
-            if res["ok"]:
-                text = (f"Coordinate check: stage positions are correct ({how}). The {len(use)} flakes are at most "
-                        f"{f2(n.max())} um from where their 100x pictures were taken (median offset {f2(res['offset_median_um'][0])}, "
-                        f"{f2(res['offset_median_um'][1])} um).")
-            else:
-                text = (f"Coordinate check: STAGE OFFSET up to {f1(n.max())} um ({wk[0]} {wk[2]}; median {f1(res['offset_median_um'][0])}, "
-                        f"{f1(res['offset_median_um'][1])} um) between where the 100x pictures were taken and where the flakes are "
-                        f"({how}): the stage slipped during the run.  The new coordinates of the {len(use)} flakes are saved "
-                        "with the results.")
-        elif stopped:
-            res.update(applied=False)
-            text = ("Coordinate check stopped during the first pass: the positions the 100x pictures were taken at are kept.  "
-                    + self.a1_first(refs, orig, s.coord_check_agree_um, "where its 100x picture was taken"))
+        tol = float(s.coord_check_agree_um)
+        res = dict(run=label, time=time.strftime("%Y-%m-%d %H:%M:%S"), program=VERSION, flake=v["name"], stem=v["stem"],
+                   picture_focus=v["focus"], minutes_since_picture=round(mins, 1), picture_um=[round(float(x), 2) for x in q],
+                   found=a is not None, how=(v.get("how") or {}).get(1), flag_um=tol)
+        if a is None:
+            ok = False
+            text = (f"First-flake check: {v['name']} (the run's first 100x picture, {mins:.0f} min before) was not found again "
+                    "at its position: no offset measured.")
         else:
-            res.update(applied=False, ok=False)
-            rep_dir, why = None, ""
-            try:
-                rep_dir, why = RMM.report_failed(wd, refs, passes, cmps, dict(run=label, pictures=len(refs), passes=len(passes),
-                                                 program=VERSION), title="Coordinate check",
-                                                 kept="The positions the 100x pictures were taken at are kept: they may be off.")
-            except Exception as e:
-                why = (f"Coordinate check FAILED: {len(passes)} passes and the last two still differ by up to "
-                       f"{f2(cmps[-1]['max_um']) if cmps else '?'} um; the positions the 100x pictures were taken at are kept "
-                       f"(no report: {type(e).__name__}: {e}).")
-            res["report"] = str(rep_dir / "index.html") if rep_dir else None
-            text = why + (f"  Report: {res['report']} (copied with the run)." if rep_dir else "")
-        mv = self.coord_movies(wd, label, refs, orig)
-        res["movies"] = [p.name for p in mv]
-        if mv:
-            text += f"  Movies of the offsets, flake by flake: {', '.join(p.name for p in mv)} (in {wd.name}, copied with the run)."
-        res["message"] = text
-        self.say(("  WARNING: " if not res.get("ok", True) or fail else "  ") + text)
+            d = np.asarray(a, float) - q
+            n = float(np.hypot(*d))
+            ok = n <= tol
+            res.update(found_um=[round(float(x), 2) for x in a], offset_um=[round(float(x), 2) for x in d], offset_norm_um=round(n, 2))
+            text = (f"First-flake check: {v['name']} (the run's first 100x picture, {mins:.0f} min before) is {f2(n)} um from where "
+                    f"its picture was taken (x {d[0]:+.2f}, y {d[1]:+.2f} um)"
+                    + ("." if ok else f": over {f1(tol)} um, the stage may have moved during the run."))
+        res.update(ok=ok, message=text)
+        self.say(("  " if ok else "  WARNING: ") + text)
         try:
             wd.mkdir(parents=True, exist_ok=True)
             (wd / "coord_check.json").write_text(json.dumps(res, indent=1, default=str), encoding="utf-8")
-            RMM.write_passes(wd / "coord_check_passes.csv", [dict(v, c_old=np.array([v["x"], v["y"]]), stem=v["stem"]) for v in refs],
-                             len(passes))
         except OSError as e:
-            self.say(f"  (the coordinate check not written: {e})")
-        if fail or not res.get("ok", True):
-            self.alert()                                   # (the sound; the message below)
+            self.say(f"  (the first-flake check not written: {e})")
+        if not ok:
+            self.alert()
         try:
             from .notify import send
-            send(s, "failed" if fail or not res.get("ok", True) else "scanned",
-                 f"{label}: coordinate check " + ("OK" if res.get("ok") else "FLAGGED" if not stopped or use else "stopped"), text,
-                 log=self.say, run=getattr(self, "slack_run", None))
+            send(s, "scanned" if ok else "failed", f"{label}: first flake " + (f"{f1(res['offset_norm_um'])} um off" if a is not None
+                 else "not found"), text, log=self.say, run=getattr(self, "slack_run", None))
         except Exception:
             pass
-
-    def apply_coord_check(self, dst):
-        """The coordinate check's positions (coord_plan) into the results on the share (dst: the run's folder there),
-        as the remeasure does (remeasure.apply_positions: each flake to where it was found, the rest of its chip by the
-        move fitted to them; the files first saved in old_coords/)."""
-        plan = self.coord_plan
-        if not plan:
-            return
-        from . import remeasure as RMM
-        try:
-            vis = {}
-            for pc in self.pieces or ():
-                folder = Path(dst) / pc["name"]
-                if not (folder / "index.html").is_file():
-                    continue
-                vs = RMM.visit_targets(folder)
-                for v in vs:
-                    p_ = plan["positions"].get((pc["name"], v["stem"]))
-                    if p_ is not None:
-                        v["c_new"] = p_ - v["o100"]
-                if any(v.get("c_new") is not None for v in vs):
-                    vis[str(folder)] = vs
-            if not vis:
-                self.say("  coordinate check: no flake of it in the copied results (not applied)")
-                return
-            self.say(f"==== coordinate check: the positions of pass A{plan['note']['passes']} into {dst}")
-            RMM.apply_positions(Path(dst), vis, np.eye(2), np.zeros(2), note=dict(how_found="coordinate check after the scan",
-                                **{k: plan["note"][k] for k in ("passes", "agreed", "stopped", "offset_max_um")}), log=self.say)
-        except Exception as e:
-            import traceback
-            self.say(traceback.format_exc().rstrip())
-            self.say(f"  WARNING: the coordinate check's positions were not applied ({type(e).__name__}: {e}); they are in "
-                     f"{self.coord_dir()[1]}_coord_check/coord_check_passes.csv")
+        return res
 
     def retake_failed(self, P):
         """retake_failed: the flakes of this piece that were not focused (imaged at the predicted Z), once more at the end

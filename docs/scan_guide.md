@@ -251,36 +251,16 @@ the mosaic around the picture at the same scale (100 %: the usual view), the mou
 dragging moves it. `hundred_mosaic: false` turns it all off. A target list without terrace outlines gets single
 pictures.
 
-**Coordinate check** (after the last 100x picture of the run). The stage slips now and then, so the positions the 100x
-pictures were taken at may not agree with each other. The program goes back to **every** 100x picture of the run, at the
-stage position and focus it was taken at (no autofocus: nothing changed), and finds the picture in a new frame (if
-needed in a 3 × 3 mosaic of frames around it): pass A1. Then A2 from the positions just found, and so on, until two
-passes in a row agree: **more than half of the flakes within 5 µm** of the pass before (after the shift they share;
-`coord_check_agree_frac`, `coord_check_agree_um`), at most 8
-passes. The flakes that do not agree (or were not found in both passes) move by the median move of the ones that
-agree. The 100x focus drifts slowly: at the first flake of every pass, and every 60
-flakes after it (`coord_check_refocus_every`), the program autofocuses and adds the change from that picture's focus to
-the following flakes' focus (an autofocus more than 10 µm off is not used). While a pass runs, the status line says how
-many flakes so far are within 5 µm of the pass before ("passed") and how many are not or were not found ("failed").
-- A window has **Stop coordinate check**: it ends the check (the scan goes on). The last complete pass is used; stopped
-  during A1: the positions the pictures were taken at are kept.
-- Stopped or cut short during A1 (the button, the job stopped, an error), the message says where A1's **first flake**
-  was found: within 5 µm of where its 100x picture was taken, the coordinates are probably good; more, they may be off;
-  and how many of the flakes A1 got through were within 5 µm.
-- The positions used are written into the results on the share after the copy, before the designer builds them: each
-  flake goes to where it was found (as the remeasure; the files first saved in `old_coords/<date_time>/`).
-- A message says how far the flakes were from where their pictures were taken: within 5 µm, *stage positions are
-  correct*; more, **STAGE OFFSET up to … µm** (flagged: an alert too; the new coordinates are saved).
-- 8 passes without two agreeing: **flagged**, a report (as the remeasure's: `<run>_coord_check/report/index.html`), and
-  the positions the pictures were taken at are kept.
+**First-flake check** (after the last 100x picture of the run). The stage slips now and then. The program goes back to
+the run's **first** 100x picture (its first focused one; none focused: its very first), at the stage position and focus
+it was taken at, and finds it in a new frame (if needed in a 3 × 3 mosaic of frames around it, then once more after an
+autofocus; never by hand). A message (log, window, Slack / email) says how far the flake is from where its picture was
+taken, e.g. *4.85 µm (x +3.10, y −3.73 µm)*; over 5 µm (`coord_check_agree_um`) it is flagged with an alert. Not found:
+the message says so. Nothing is moved: the coordinates stay where the pictures were taken.
 
-Always written: `<run>_coord_check/coord_check.json` (passes, offsets) and `coord_check_passes.csv` (each picture's position in
-every pass) in the run's folder, copied to the share. `coord_check: false` turns it off.
-
-Movies, in `<run>_coord_check/` too: `<run>_A1_vs_A0.mp4` (each flake's A1 position against where its
-100x picture was taken), `<run>_A2_vs_A1.mp4`, ... one per pass, also for a pass cut short. One frame per flake in the
-order the pass visited them: the offset vector (grey: the flakes before; blue: the median so far; green: 5 µm), where
-the flakes are on the chip (colour: how far off) and dx, dy, |offset| against the visit number.
+Written: `<run>_coord_check/coord_check.json` (the flake, the offset) in the run's folder, copied to the share.
+`coord_check: false` turns it off. (Until py-2026-11-15a this was the coordinate check, which visited every 100x picture
+in passes until two agreed and moved the coordinates.)
 
 ### Step 9: graphite only, stacking domains
 
@@ -644,7 +624,7 @@ What to check:
 - The log (`remeasure_<run>_<time>/` in the local results folder) gives each pass and the largest difference between
   the last two. Pictures of flakes found by hand are saved there too.
 - `data/<chip>_remeasure_passes.csv` lists each flake's position in every pass (A1_x_um, A2_x_um, …) and the final one.
-- Movies of the passes (as the coordinate check's; A1 against where the 10x find put each flake), in the log folder and
+- Movies of the passes (A1 against where the 10x find put each flake), in the log folder and
   in the run's `remeasure_movies/`. Cut short during A1, a message says where A1's first flake was found.
 - The viewer's subtitle says *coordinates remeasured <date>*; `remeasure.json` in the run folder has the details.
 
@@ -905,12 +885,16 @@ The download, the checks and the copy run in a separate Python process, whose me
 process ends without finishing, the scan program stays open and the window says so (with the version installed now);
 then run `C:\FlakeID\run_flakeid.bat update` from a Command Prompt, which shows every message.
 
+The program asks GitHub whether there is a newer version when it starts and every 30 minutes after. While there is
+one, an orange banner at the top of the main window and of the start screen says **Update available (date): please
+update**; the start screen's banner has its own **Update...** button.
+
 The repository afylab/Flake-Finder is public, so **Update...** needs no GitHub token. A token is only needed when
 `update_repo` points at a private repository (e.g. your own private fork): on github.com, *Settings > Developer
 settings > Fine-grained tokens > Generate new token*, only that repository, permission **Contents: Read-only** (and an
 expiry date you note down). Put the token alone in `C:\FlakeID\github_token.txt` (setting `update_token_file`),
 readable only by the scan's Windows account, or in the environment variable `FLAKEID_GITHUB_TOKEN`; never in
-`scan_settings.json`. An expired token gives "GitHub refused (401)": make a new one. To go back to an earlier version,
+`scan_settings.json`. An expired token is skipped for a public repository (it is read without one); for a private one it gives "GitHub refused (401)": make a new one. To go back to an earlier version,
 copy a folder of `C:\FlakeID\update_backups\` over `C:\FlakeID\FlakeIdentifier\`.
 
 **Logs copied to GitHub (optional).** The program can copy its logs to a private GitHub repository, so a problem can
@@ -1052,10 +1036,10 @@ Choosing one fills the boxes below (targets per cm², Which flakes, Thin hBN sea
 rest of its settings apply to the job without a box. Remembered on this PC, and the targets per cm² are remembered for
 each profile on its own. The log says the profile (`scan profile: ...`).
 
-- **Current settings**: the settings file as it is (100 targets per cm², every target imaged, the coordinate check).
+- **Current settings**: the settings file as it is (100 targets per cm², every target imaged, the first-flake check).
 - **Jordan's original (as of 2026-10-20)** (the label in the window): the original settings: 25 targets per cm² (at
   most 400 a piece); hBN: the 48 of each piece's targets with the largest best terrace are imaged
-  (`hbn_imaged_per_cm2` null, `hbn_max_targets` 48); no coordinate check (`coord_check` false); Standard targets, no
+  (`hbn_imaged_per_cm2` null, `hbn_max_targets` 48); no first-flake check (`coord_check` false); Standard targets, no
   thin hBN search. As in the current settings: 3 flakes in a row not found at 100x ask the operator (`lost_after`),
   the retakes' wider search.
 - More profiles: `scan_profiles` in `scan_settings.json`, e.g.

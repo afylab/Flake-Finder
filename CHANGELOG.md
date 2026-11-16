@@ -2,6 +2,17 @@
 
 Notable changes to FlakeIdentifier. The scan program's version is shown in its window and logs (`py-YYYY-MM-DD<letter>`).
 
+## py-2026-11-16a
+
+- The coordinate check (every 100x picture visited again in passes until two agreed, then the coordinates moved) is
+  replaced by the **first-flake check**: after the 100x imaging, the run's first (focused) 100x picture is found again
+  at its position and its offset from where it was taken is reported (over 5 µm: flagged). Nothing is moved.
+  `coord_check_agree_frac` and `coord_check_max_passes` are no longer used (still accepted in settings files).
+- **Update available** banner: the program asks GitHub for a newer version at the start and every 30 minutes; while
+  there is one, a banner at the top of the main window and of the start screen (with its own Update...).
+- Update: an expired token (or one made for the old private repository) no longer stops an update from the public
+  repository: it is read without the token.
+
 ## py-2026-11-15a
 
 - One chip the analysis cannot handle no longer costs the rest of the run. A near-bare chip (nothing to focus on or to

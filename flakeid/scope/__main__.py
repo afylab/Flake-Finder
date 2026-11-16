@@ -311,6 +311,7 @@ def _main(argv=None):
         from .ui import TkUI
         ui = TkUI(theme=s.ui_theme)
         ui.microscope = Microscope(core, a.cfg, corelog=corelog)
+        ui.watch_updates(s)                             # (a banner while GitHub has a newer version: at the start, every 30 min)
         # one job after the other: each with fresh settings (a run changes its copy: names, folders, ...)
         # (settings read again for every job: a new flat field adopted in one job is used by the next)
         ui.run(lambda: Scanner(core, load(a.settings, **ov), ui))
