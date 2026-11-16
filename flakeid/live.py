@@ -49,6 +49,11 @@ from .pipeline import DEFAULT_RANGE_NM, FlakeResult, FlakeSummary, Terrace
 _POSITION = re.compile(r"position(\d+)")
 
 
+# <run folder>/<piece><TARGETS_FAILED>: the analysis could not analyse the piece (its error) and went on with the next
+# ones; the microscope then stops waiting for the piece's target list
+TARGETS_FAILED = "_targets_failed.json"
+
+
 class LiveError(RuntimeError):
     """The analysis cannot work (e.g. the flat field cannot be read): stop instead of writing an empty target list."""
 
@@ -193,7 +198,9 @@ def analyse_block(tiles: list, core: list, cfg: dict) -> dict:
                 smap = None
             else:
                 reg = f"{stats['used']}/{stats['pairs']} pairs"
-        except RuntimeError:
+        except (RuntimeError, ValueError, np.linalg.LinAlgError):
+            # (too few pairs, or a degenerate fit: a block of almost bare, featureless substrate gave a singular
+            # matrix, LinAlgError, which stopped the whole run's analysis, 2026-11-15): the stage positions
             smap = None
     if smap is None:
         q = (np.linalg.inv(M) @ (P - P[0]).T).T
@@ -1741,7 +1748,7 @@ def process_run(run_dir: Path, man_path: Path, a, out: Path, log=print):
                 time.sleep(0.5)
         return {"pieces": [], "state": "?"}
 
-    done, mats, viewers, finishing = [], {}, {}, []
+    done, mats, viewers, finishing, failed_pieces = [], {}, {}, [], []
     analysing = threading.Event()
     analysing.set()
     exporter = None
@@ -1826,12 +1833,26 @@ def process_run(run_dir: Path, man_path: Path, a, out: Path, log=print):
             lv.say(f"provisional target list after {n} blocks: {n_t} flakes ({nm}_targets_partial.csv)")
         if not getattr(a, "no_partial", False) and not image_only:
             live.on_progress = provisional
+        try:                                            # (an earlier attempt's: analysed again now)
+            (run_dir / f"{name}{TARGETS_FAILED}").unlink(missing_ok=True)
+        except OSError:
+            pass
         try:
             live.run(build_viewer=False)
         except LiveError as exc:
-            log(f"ERROR on {name}: {exc}.  No target list written for it (the microscope script keeps waiting for "
-                f"{name}_targets.csv); fix the problem and run this command again: pieces with a target list are skipped.")
-            return 2
+            # this piece only: the run's other pieces are still analysed and their 100x pictures exported (2026-11-15:
+            # one piece's failure stopped the analysis, and the 3 pieces after it got no target list and no viewer
+            # got its 100x pictures); <piece>_targets_failed.json tells the microscope not to wait for this piece's list
+            log(f"ERROR on {name}: {exc}.  No target list written for it; the other pieces go on.  Fix the problem and run "
+                "this command again: pieces with a target list are skipped.")
+            try:
+                (run_dir / f"{name}{TARGETS_FAILED}").write_text(json.dumps({"error": str(exc),
+                                                                             "time": time.strftime("%Y-%m-%d %H:%M:%S")}))
+            except OSError as e:
+                log(f"  ({name}{TARGETS_FAILED} not written: {e})")
+            failed_pieces.append(name)
+            done.append(name)
+            continue
         # the piece's entry again (its target numbers may have been written after the analysis started on it)
         p = next((q for q in (manifest().get("pieces") or []) if q.get("name") == name), p)
         mt2 = int(p.get("max_targets") or 0) or a.max_targets
@@ -1868,7 +1889,7 @@ def process_run(run_dir: Path, man_path: Path, a, out: Path, log=print):
     for th in finishing:
         th.join()
     analysing.clear()
-    log(f"all {len(done)} pieces analysed")
+    log(f"all {len(done)} pieces analysed" + (f"; failed: {', '.join(failed_pieces)} (no target list)" if failed_pieces else ""))
     if exporter is not None:
         if viewers:
             log("waiting for the end of the 100x imaging (exports each piece's 100x images as it ends) ...")
@@ -1877,7 +1898,7 @@ def process_run(run_dir: Path, man_path: Path, a, out: Path, log=print):
             log("designer run: built by the vdW Stack Designer (afylab/flakeid-designer) from the results")
     if scan_gone(manifest()):                       # (crashed: nobody else copies the results)
         copy_after_crash(run_dir, man_path, manifest(), out, log)
-    rc = 0
+    rc = 2 if failed_pieces else 0
     if a.then_batch:
         from .cli import main as batch
         for name in done:
