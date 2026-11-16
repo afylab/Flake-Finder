@@ -31,7 +31,7 @@ import numpy as np
 from .settings import Settings, dump
 from flakeid.fieldmosaic import field_size_um, fmt_matrix, format_poly, parse_poly, plan_fields
 
-VERSION = "py-2026-11-12d"
+VERSION = "py-2026-11-15a"
 NAN = float("nan")
 MANUAL_RETAKE = "Manual focus (retakes)"       # the 100x window's button: a retake focused by hand
 IDX100_HEADER = ("order,label,stage_x_um,stage_y_um,z_um,z_drive,z10_um,offset_um,focus,af_ratio,saturated_frac,file,shift_files,"
@@ -844,6 +844,7 @@ class Scanner:
         self.lines = self.side_type = self.arcs = None
         self.polygon = None                     # the piece's scan area drawn by hand (chip_type "polygon"), else None
         self.analysis = None                    # local flakeid.live process
+        self.analysis_gone = None               # its exit code once it has ended and self.analysis was let go
         self.nose = None                        # coded nosepiece reader (flakeid.scope.nosepiece)
         self.M = np.array(s.M, float)
         # where the time goes: wall time per phase (set_phase) and time inside each kind of operation (op)
@@ -2959,10 +2960,29 @@ class Scanner:
         except Exception as e:
             self.say(f"  WARNING: could not start the analysis ({e}); start it by hand: python -m flakeid.live {self.run_dir} ...")
 
+    def analysis_gave_up(self, targets_csv):
+        """The analysis's error if it could not analyse this piece (<piece>_targets_failed.json beside its target list,
+        flakeid.live.TARGETS_FAILED: it went on with the next pieces), else None."""
+        f = Path(str(targets_csv).replace("_targets.csv", "_targets_failed.json"))
+        try:
+            if f.is_file():
+                return str(json.loads(f.read_text(encoding="utf-8")).get("error") or "see analysis_log.txt")
+        except (OSError, ValueError):
+            return "see analysis_log.txt"
+        return None
+
+    def _let_analysis_go(self):
+        """The ended analysis process let go (no waiting for it at the end); its exit code kept: analysis_ended()."""
+        if self.analysis is not None:
+            self.analysis_gone = self.analysis.returncode
+        self.analysis = None
+
     def analysis_ended(self):
         """True once this PC's analysis has ended for good (not about to be started again after a crash)."""
         p = self.analysis
-        if p is None or p.poll() is None:
+        if p is None:                                   # (let go after it ended: still ended, for every later piece;
+            return getattr(self, "analysis_gone", None) is not None    # 2026-11-15: the next 2 pieces waited 6 and 12 min)
+        if p.poll() is None:
             return False
         if p.returncode == 1 and getattr(self, "analysis_restarts", 0) < self.s.analysis_restarts and not self.stop_all:
             time.sleep(4.0)                             # (its follower restarts it within 3 s: self.analysis is then the new one)
@@ -3011,11 +3031,21 @@ class Scanner:
                     self.start_analysis()
                     return
                 if proc.returncode not in (0, None) and self.analysis is proc:
-                    msg = (f"The analysis on this PC stopped with an error (exit {proc.returncode}); no more target lists will be "
-                           f"written.  See {logp}." + (f"\n\n{last_error}" if last_error else ""))
+                    # (exit 2 also when it went through every chip but could not analyse some: <chip>_targets_failed.json)
+                    bad = [p["name"] for p in (self.pieces or ()) if self.analysis_gave_up(
+                           Path(self.run_dir) / f"{p['name']}_targets.csv") is not None] if getattr(self, "run_dir", None) else []
+                    if bad:
+                        title = "Analysis: chips not analysed"
+                        msg = (f"The analysis on this PC could not analyse {', '.join(bad)}: no target list, so no 100x pictures "
+                               f"of {'it' if len(bad) == 1 else 'them'}; the other chips were analysed.  See {logp}."
+                               + (f"\n\n{last_error}" if last_error else ""))
+                    else:
+                        title = "Analysis stopped"
+                        msg = (f"The analysis on this PC stopped with an error (exit {proc.returncode}); no more target lists will be "
+                               f"written.  See {logp}." + (f"\n\n{last_error}" if last_error else ""))
                     self.say("  WARNING: " + msg)
                     try:
-                        self.ui.message("Analysis stopped", msg)
+                        self.ui.message(title, msg)
                     except Exception:
                         pass
                 return
@@ -5362,13 +5392,18 @@ class Scanner:
                 if el > timeout_s:
                     self.say(f"    gave up waiting for {path} after {f1(el)} s")
                     return False
+                why = self.analysis_gave_up(path) if path.name.endswith("_targets.csv") else None
+                if why is not None and not path.exists():
+                    self.say(f"    the analysis could not analyse this piece ({why}): not waiting for {path.name}")
+                    return False
                 if self.analysis_ended():
                     time.sleep(2.0)
                     if path.exists():
                         continue
-                    self.say(f"    the analysis on this PC has ended (exit {self.analysis.returncode}) without writing {path.name}: "
+                    rc = self.analysis.returncode if self.analysis is not None else self.analysis_gone
+                    self.say(f"    the analysis on this PC has ended (exit {rc}) without writing {path.name}: "
                              f"not waiting for it; see {self.analysis_out / 'analysis_log.txt'}")
-                    self.analysis = None
+                    self._let_analysis_go()
                     return False
                 if time.time() - last > 60:
                     self.say(f"    waiting for {what} ({f1(el)} s)")
@@ -6004,13 +6039,18 @@ class Scanner:
                 self.say(f"    gave up waiting for {final} after {f1(el)} s" + (f" ({len(P['imaged'])} flakes imaged from the provisional list)"
                                                                                if P["imaged"] else ""))
                 return
+            why = self.analysis_gave_up(final)
+            if why is not None and not final.exists():
+                self.say(f"    the analysis could not analyse {s.name} ({why}): no target list, not waiting for it")
+                return
             if self.analysis_ended():
                 time.sleep(2.0)
                 if final.exists():
                     continue
-                self.say(f"    the analysis on this PC has ended (exit {self.analysis.returncode}) without writing {final.name}: "
+                rc = self.analysis.returncode if self.analysis is not None else self.analysis_gone
+                self.say(f"    the analysis on this PC has ended (exit {rc}) without writing {final.name}: "
                          f"not waiting for it; see {self.analysis_out / 'analysis_log.txt'}")
-                self.analysis = None
+                self._let_analysis_go()
                 return
             if time.time() - last_say > 60:
                 self.say(f"    waiting for the target list of {s.name} ({f1(el)} s)")
