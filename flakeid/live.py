@@ -692,9 +692,21 @@ class LiveScan:
         # one block can be mostly off the chip or covered); the oxide from its colour (thickness.oxide_from_substrate,
         # 2026-10-29: the fit to the flakes' colours, used before, was off by up to 50 nm on 285 nm graphite and found
         # nothing on chips without flat material).  With --no-refine-oxide: blocks with a few flakes (full analyses).
+        # A block whose substrate colour fits no oxide is not counted (2026-11-17, 20261117_run_1: two corner blocks of a
+        # broken 90 nm graphite piece took the bright surround for the substrate, R/G 0.596 B/G 0.481, misfit 0.040, and
+        # outvoted the one good block, 0.615 / 0.614 = 86.5 nm, so the analysis stopped).  When no block fits, freeze_oxide
+        # still stops on their colour (the light changed), after MAX_PREFREEZE blocks.
         if self.oxide_frozen is None and r.get("substrate") is not None:
             self.sub_all.append(r["substrate"])
-            if r.get("oxide_only") or len(r["flakes"]) >= 5:
+            fits = True
+            if self.refine:
+                from .thickness import oxide_from_substrate, SUBSTRATE_MAX_MISFIT
+                f = oxide_from_substrate(r["substrate"], self.oxide_entered)
+                fits = f is None or f["misfit"] <= SUBSTRATE_MAX_MISFIT
+                if not fits:
+                    self.say(f"  (its substrate colour fits no oxide, misfit {f['misfit']:.4f}: not the bare substrate, e.g. "
+                             "the surround of a broken edge; not used for the oxide)")
+            if fits and (r.get("oxide_only") or len(r["flakes"]) >= 5):
                 self.sub_pool.append(r["substrate"])
             if len(self.sub_pool) >= self.MIN_OXIDE_BLOCKS:
                 self.freeze_oxide()
