@@ -31,7 +31,7 @@ import numpy as np
 from .settings import Settings, dump
 from flakeid.fieldmosaic import field_size_um, fmt_matrix, format_poly, parse_poly, plan_fields
 
-VERSION = "py-2026-11-19a"
+VERSION = "py-2026-11-19b"
 NAN = float("nan")
 MANUAL_RETAKE = "Manual focus (retakes)"       # the 100x window's button: a retake focused by hand
 IDX100_HEADER = ("order,label,stage_x_um,stage_y_um,z_um,z_drive,z10_um,offset_um,focus,af_ratio,saturated_frac,file,shift_files,"
@@ -1985,6 +1985,7 @@ class Scanner:
     def sharpness(self, roi):
         import cv2
         a = self.frame()
+        self._af_frame = a                               # (the sweep's substrate check: loose 1 cm chips)
         W, H = self.W, self.H
         rw, rh = int(W * roi) & ~1, int(H * roi) & ~1
         x0, y0 = ((W - rw) // 2) & ~1, ((H - rh) // 2) & ~1
@@ -2002,15 +2003,34 @@ class Scanner:
         gx, gy = cv2.Sobel(c, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(c, cv2.CV_32F, 0, 1, ksize=3)
         return float(np.sqrt(gx * gx + gy * gy).mean()) / max(mean, 1.0)
 
+    def af_min_substrate(self):
+        """The 10x focus points of a loose 1 cm chip (2026-11-19: the autofocus focused on the plastic holder beside the
+        chip): the fraction of a sweep's frame that must be substrate colour for that height to count as focus
+        (focus_min_substrate_af); 0 = no check (other chips, 100x, no substrate reference yet)."""
+        s = self.s
+        if (getattr(s, "chip_type", "") != "loose_1cm" or getattr(self, "cur_phase", "") != "10x focus points"
+                or getattr(self, "REF", None) is None or getattr(self, "mono_view", False)):
+            return 0.0
+        return float(getattr(s, "focus_min_substrate_af", 0.0) or 0.0)
+
     def sweep(self, zs, roi):
         ms = np.full(len(zs), -1.0)
         if self.set_z(zs[0] - self.s.af_backlash_um):
             self.check_z_reach("autofocus sweep")
+        need, out = self.af_min_substrate(), []
         for i, z in enumerate(zs):
             if self.set_z(z):
                 ms[i] = self.sharpness(roi)
+                if need > 0 and getattr(self, "_af_frame", None) is not None:
+                    fr = self.substrate_fraction(self.blocks(self._af_frame))
+                    if fr < need:                        # (not the chip: the holder, tape, glue in focus)
+                        ms[i] = 0.0
+                        out.append(fr)
         if len(zs) > 1 and self.z_cmd == zs[-1]:
             self.check_z_reach("autofocus sweep")       # (the sweep's two ends read back: the drive at a limit)
+        if out:
+            self.say(f"      autofocus: {len(out)} of {len(zs)} heights not used: under {f1(100 * need)} % of the picture is "
+                     f"substrate colour there ({f1(100 * max(out))} % at most: the holder, not the chip?)")
         self.despike(zs, ms, roi)
         bi = int(np.argmax(ms))
         L = self.z_limits.get("lower")
@@ -2246,8 +2266,9 @@ class Scanner:
         return m == "always" or (m == "first" and n_focused == 0)
 
     def ask_focus(self, title, what, timeout=None, image=None, **kw):
-        """0 = use, 1 = skip, 2 = stop, 3 = no answer within timeout (the predicted Z is used).  image: a picture of
-        the flake to look for (shown beside the live view); kw: button (its text), cross (centring cross)."""
+        """0 = use, 1 = skip, 2 = stop, 3 = no answer within timeout (the predicted Z is used), 4 = skip all (kw
+        skip_all=True: that button).  image: a picture of the flake to look for (shown beside the live view); kw: button
+        (its text), cross (centring cross)."""
         if image is None and not kw:
             return self.ui.ask_focus(self, title, what, timeout)
         return self.ui.ask_focus(self, title, what, timeout, image=image, **kw)
@@ -7147,8 +7168,13 @@ class Scanner:
                            "box is the 100x field; switch to the 10x objective to look around if needed).  With the 100x objective, "
                            "centre it on the cross, focus it, and press \"Flake is centered and in focus\".  You are then asked "
                            "which focus knob you used.\n\n\"Skip\": go on as before (these flakes are only hard to recognise); "
-                           "\"Stop\": no more flakes on this piece.", None, image=pic, button="Flake is centered and in focus",
-                           cross=True, caption="Where the flake should be\n(10x scan; box = 100x field)")
+                           "\"Skip all\": the same, and not asked again in this run; \"Stop\": no more flakes on this piece.",
+                           None, image=pic, button="Flake is centered and in focus", cross=True,
+                           caption="Where the flake should be\n(10x scan; box = 100x field)", skip_all=True)
+        if a == 4:
+            self.skip_all_find = True
+            self.say("    skipped by the operator, Skip all: going on as before; no more questions to find or focus a flake "
+                     "by hand in this run")
         if a == 2:
             P["stop"] = True
             self.say("    stopped by the operator: no more flakes on this piece")
@@ -7308,7 +7334,7 @@ class Scanner:
             # a focus question only on the piece's first flakes (af_manual_fallback "first"), and not again on this piece
             # once one went unanswered (focus_dialog_repeat)
             asking = (not retake and self.ask_on_fail(len(P["focused"])) and self.ui.can_ask
-                      and (s.focus_dialog_repeat or not P.get("no_ask")))
+                      and (s.focus_dialog_repeat or not P.get("no_ask")) and not getattr(self, "skip_all_find", False))
             if not r[2] and not retake and s.af_long_after > 0 and not P.get("long_tried") and (P["fail_run"] + 1 >= s.af_long_after or asking):
                 # the usual searches failed again (or a question would be asked): has the focus drive slipped (20261014_run_1:
                 # 40-60 um)?  One long coarse search per run of failures; a focus far away is confirmed below (a focus jump)
@@ -7348,9 +7374,15 @@ class Scanner:
                 self.set_z(zg)
                 self.alert(image=self.target_picture(P, lab), what=f"Autofocus failed on {lab} ({s.name}, 100x): focus by hand within {int(s.focus_dialog_timeout_s)} s, or the "
                            "scan goes on at the predicted focus.")
-                a = self.ask_focus(f"{s.name} 100x", f"Autofocus failed on {lab}. Check the stage is on this flake (picture), then focus by hand.",
-                                   s.focus_dialog_timeout_s, image=self.target_picture(P, lab))
-                if a == 0:
+                a = self.ask_focus(f"{s.name} 100x", f"Autofocus failed on {lab}. Check the stage is on this flake (picture), then focus by hand."
+                                   "\n\n\"Skip all\": imaged at the predicted focus, and no more of these questions in this run.",
+                                   s.focus_dialog_timeout_s, image=self.target_picture(P, lab), skip_all=True)
+                if a == 4:
+                    self.skip_all_find = True
+                    self.set_z(zg)
+                    how = "predicted"
+                    self.say("    Skip all: imaged at the predicted Z; no more questions to find or focus a flake by hand in this run")
+                elif a == 0:
                     how = "manual"
                 elif a == 2:
                     P["stop"] = True
@@ -7411,7 +7443,8 @@ class Scanner:
                 P["miss_list"] = []
             P["miss_run"] = P.get("miss_run", 0) + 1
             P["miss_list"].append((t, k))
-            if s.lost_after > 0 and P["miss_run"] >= s.lost_after and self.ui.can_ask and not P["stop"]:
+            if (s.lost_after > 0 and P["miss_run"] >= s.lost_after and self.ui.can_ask and not P["stop"]
+                    and not getattr(self, "skip_all_find", False)):
                 # (3 in a row also happen now and then on a good run: 15-20 % of flakes are not recognised; first the last
                 # flake recognised is looked at again: still there, the stage has not moved)
                 if self.still_there(P):

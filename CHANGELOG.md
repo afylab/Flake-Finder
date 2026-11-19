@@ -2,6 +2,17 @@
 
 Notable changes to FlakeIdentifier. The scan program's version is shown in its window and logs (`py-YYYY-MM-DD<letter>`).
 
+## py-2026-11-19b
+
+- **Loose 1 cm chips: focus on the chip, not the holder.** In each 10x focus point's autofocus sweep, a height counts as
+  focus only where at least 15 % of the picture is substrate colour (`focus_min_substrate_af`). The plastic holder in
+  focus beside the chip no longer wins; with no such height the point is tried further in. Other chip types and the 100x
+  autofocus are unchanged.
+- **Skip all** in the 100x windows that ask you to find and focus a flake by hand ("N flakes not found", "Autofocus
+  failed"): the scan goes on and asks no more of these questions in the run.
+- **Those windows fit the screen.** The live view is made smaller when the window would be taller than the screen, and
+  on a narrow screen the "where the flake should be" picture too; the buttons are always visible.
+
 ## py-2026-11-19a
 
 - **Oxide way off the one entered: a message at once.** When the oxide measured from a chip's substrate colour is more

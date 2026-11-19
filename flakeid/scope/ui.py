@@ -517,7 +517,7 @@ class AutoUI:
         return True
 
     def ask_focus(self, scanner, title, what, timeout=None, image=None, button="", cross=False, caption=None, image2=None,
-                  caption2=None, marks2=None, flip=None, grid=False, flip2=None):
+                  caption2=None, marks2=None, flip=None, grid=False, flip2=None, skip_all=False):
         if cross and hasattr(self.core, "mockCentre"):
             r = self.core.mockCentre()
             if r is not None:                       # (a simulated operator's own answer: 1 skip, 2 stop)
@@ -2913,7 +2913,7 @@ class TkUI:
             pass
 
     def ask_focus(self, scanner, title, what, timeout=None, image=None, button="Use this focus", cross=False, caption=None,
-                  image2=None, caption2=None, marks2=None, flip=None, grid=False, flip2=None):
+                  image2=None, caption2=None, marks2=None, flip=None, grid=False, flip2=None, skip_all=False):
         """Live view to focus by hand.  image: a picture of where the flake should be (the 10x crop the analysis wrote,
         the 100x field boxed), shown beside the live view so the user can check the stage is on the right flake.
         cross: a cross at the centre of the live view (centring a flake).  caption: the picture's title.  image2,
@@ -2922,7 +2922,8 @@ class TkUI:
         label above each.  flip: (left-right, up-down) for both pictures (default: as the live view); flip2: image2's
         own (else flip).  grid: the picture
         as large as the live view (the same field: the same scale), a white grid and the cross on both (aligning by hand
-        a 100x picture)."""
+        a 100x picture).  skip_all: a "Skip all" button too (returns 4).  A window without image2 / grid is made to fit the
+        screen's height (2026-11-19: the find-the-flake window was taller than the screen): the live view smaller."""
         def make(done):
             w = self._dialog(title)
             big = bool(image2) or grid                          # (the remeasure's calibration and finding by hand: large)
@@ -2939,7 +2940,8 @@ class TkUI:
             cd = ttk.Label(w, text="")
             cd.pack(side="bottom", padx=12, anchor="w")
             ttk.Label(w, text=what + ("" if cross else "\n\nFocus with the Z buttons (or the focus control), then:"), justify="left",
-                      font=("Segoe UI", 10), wraplength=max(900, sw - 120) if big else 900).pack(side="bottom", padx=12, anchor="w")
+                      font=("Segoe UI", 10), wraplength=max(900, sw - 120) if big else max(900, min(sw - 120, 1200))
+                      ).pack(side="bottom", padx=12, anchor="w")
             body, scv = self._scrolled(w) if big else (w, None)   # (the pictures and the live view: scroll bars)
             if image2 and Path(image2).is_file():
                 try:
@@ -2952,7 +2954,7 @@ class TkUI:
             lv = LiveView(self, top, scanner, cross=cross, grid=grid, free_xy=big)
             lv.frame.pack(side="left")
 
-            sides = []
+            sides, side_full, side_lab = [], [], []
 
             def side_picture():
                 if not (image and Path(image).is_file()):
@@ -2964,15 +2966,19 @@ class TkUI:
                         im = im.resize((max(1, int(scanner.W * lv.scale)), max(1, int(scanner.H * lv.scale))), Image.LANCZOS)
                         im = Image.fromarray(LiveView.draw_cross(LiveView.draw_grid(np.asarray(im))))
                     else:
+                        side_full.append(im.copy())             # (made smaller on a narrow screen: fit below)
                         im.thumbnail((360, 360))
                     ph = self.tk.PhotoImage(master=w, data=f"P6 {im.size[0]} {im.size[1]} 255 ".encode() + im.tobytes(), format="PPM")
                     side = ttk.Frame(top)
                     side.pack(side="left", padx=(12, 0), anchor="n")
                     sides.append(side)
-                    ttk.Label(side, text=caption or "Where the flake should be\n(10x scan; box = 100x field)", justify="left").pack(anchor="w", pady=(0, 6))
+                    cap = ttk.Label(side, text=caption or "Where the flake should be\n(10x scan; box = 100x field)", justify="left")
+                    cap.pack(anchor="w", pady=(0, 6))
+                    side_lab.append(cap)
                     lab = tk.Label(side, image=ph, borderwidth=0)
                     lab.image = ph
                     lab.pack(anchor="w")
+                    side_lab.insert(0, lab)
                 except Exception:
                     pass
             if not grid:
@@ -3012,6 +3018,46 @@ class TkUI:
                     pass
             if grid:
                 side_picture()
+            if not big:
+                # (2026-11-19: the find-the-flake window was taller than the screen) the whole window on the screen:
+                # the live view smaller, and on a narrow screen the picture beside it.  Measured once the window is
+                # shown, then again as the live pictures come in (no layout pass while it is built: on the Mac that
+                # crashed Tk when the window was mapped early)
+                room_w, room_h = sw - self.FIT_FREE[0], sh - self.FIT_FREE[1]
+
+                def fit(n=0):
+                    try:
+                        if not w.winfo_exists():
+                            return
+                        if side_full and side_lab and w.winfo_reqwidth() > room_w:
+                            from PIL import Image
+                            cur = int(side_lab[0].cget("width") or 0) or side_lab[0].winfo_reqwidth()
+                            m = max(120, cur - (w.winfo_reqwidth() - room_w))
+                            if m < cur:
+                                im2 = side_full[0].copy()
+                                im2.thumbnail((m, m))
+                                ph2 = self.tk.PhotoImage(master=w, data=f"P6 {im2.size[0]} {im2.size[1]} 255 ".encode() + im2.tobytes(), format="PPM")
+                                side_lab[0].configure(image=ph2)
+                                side_lab[0].image = ph2
+                                for c in side_lab[1:]:                  # (its caption wrapped to it)
+                                    c.configure(wraplength=max(100, im2.size[0]))
+                        # (the live picture's height at its scale, drawn or not; the picture beside it in the same row)
+                        other = w.winfo_reqheight() - top.winfo_reqheight()
+                        lv0 = lv.frame.winfo_reqheight() - lv.img_lbl.winfo_reqheight()
+                        side_h = max([x.winfo_reqheight() for x in sides] + [0])
+                        need = other + max(side_h, lv0 + int(scanner.H * lv.scale))
+                        if need > room_h and lv.scale > 0.15:
+                            lv.set_scale(max(0.15, min(lv.scale, (room_h - other - lv0) / float(scanner.H))))
+                        # (the size set: a window once taller than the screen keeps that size by itself, the Mac)
+                        ww = min(room_w, w.winfo_reqwidth())
+                        wh = min(room_h, other + max(side_h, lv0 + int(scanner.H * lv.scale)))
+                        w.geometry(f"{ww}x{wh}" + (f"+{max(0, (sw - ww) // 2)}+0" if n == 0 else ""))
+                        self.fit_asked = (need, room_h, lv.scale)   # (tests)
+                        if n < 4:
+                            w.after(400, lambda: fit(n + 1))
+                    except Exception:
+                        pass
+                w.after(100, fit)
             if big:
                 if sys.platform == "win32":                     # (opens maximised; the title bar's button as usual)
                     try:
@@ -3027,6 +3073,8 @@ class TkUI:
                 done(v)
             ttk.Button(bf, text=button, width=max(16, len(button) + 2), style="Accent.TButton", command=lambda: fin(0)).pack(side="left", padx=6)
             ttk.Button(bf, text="Skip", width=10, command=lambda: fin(1)).pack(side="left", padx=6)
+            if skip_all:                                        # (2026-11-19: worst case, the rest of the run without asking)
+                ttk.Button(bf, text="Skip all", width=10, command=lambda: fin(4)).pack(side="left", padx=6)
             ttk.Button(bf, text="Stop", width=10, command=lambda: fin(2)).pack(side="left", padx=6)
             w.protocol("WM_DELETE_WINDOW", lambda: fin(1))
             if timeout:

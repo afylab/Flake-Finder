@@ -117,6 +117,10 @@ class Settings:
     # the chip's centre, focus_moves times); one that disagrees with the plane through the others by more than
     # focus_outlier_um is refocused further in, and left out of the focus surface if it still disagrees
     focus_min_substrate: float = 0.3
+    # loose 1 cm chips (chip_type loose_1cm, 2026-11-19: the autofocus focused on the plastic holder beside the chip): in
+    # each 10x focus point's autofocus sweep, a height counts as focus only if at least this fraction of the picture
+    # is substrate colour there (none such: the point fails and is tried further in)
+    focus_min_substrate_af: float = 0.15
     focus_moves: int = 3
     focus_outlier_um: float = 8.0
     max_dz_um: float = 150.0
