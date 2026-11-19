@@ -209,7 +209,7 @@ yet, it waits for the analysis (the waiting window can be ignored).
 If autofocus fails on the first flakes of a chip, it first searches ±80 µm around the expected focus (a focus drive
 that has slipped; see Part 2); only then a live view asks you to focus by hand. Beside the live view it shows a 10x
 picture of the flake from the scan, with the 100x field boxed: check the stage is on that flake (if not, move to it),
-focus, then **Use this focus** (*Skip* leaves this flake out, *Stop* ends the 100x part). Unanswered, it uses its own estimate
+focus, then **Use this focus** (*Skip* leaves this flake out, *Skip all* images it at the estimate and asks no more of these questions in the run, *Stop* ends the 100x part). The window fits the screen (the live view is made smaller on a small screen). Unanswered, it uses its own estimate
 after 2 minutes (the countdown is shown), and asks no more focus questions on that chip (`focus_dialog_repeat`). Flakes
 it could not focus are imaged at the estimate and tried once more at the end of the chip, when a flake after them was
 focused (`retake_failed`; the log says `retaking ...`); a retake replaces the first image. A retake **searches harder**:
@@ -359,7 +359,7 @@ are not recognised on a normal run). If not, the stage or the chip has moved (BN
 the scan alerts you (sound, Slack / email) and waits. Centre and focus the flake shown (switch to 10x to look around if
 needed), press *Flake is centered and in focus*, then say which knob you focused with. *Fine knob only*: the focus drive
 saw it, so the focus height is right. *The coarse knob too*: the drive cannot see the coarse knob, so every focus height
-is shifted by the difference from the expected focus (as the pause check does). The stage's shift moves every target from
+is shifted by the difference from the expected focus (as the pause check does). *Skip* goes on as before (asked again after 3 more); *Skip all* goes on and asks no more of these (nor the focus-by-hand question) in this run. The stage's shift moves every target from
 then on; the 100x, mosaic and IR indexes keep the 10x scan's frame; the flakes missed before are imaged again at the end
 of the piece; focus offsets measured while flakes were missed are dropped (a false focus jump among them). *Skip* goes on
 without it; *Stop* ends the piece.
@@ -1002,7 +1002,9 @@ After the Messages window, a scan asks what is on the stage:
   (within ~1 mm is enough; material and oxide once per block), then **3 reference corners** of the block: chip
   corners far apart that you will find again on the AFM (put each in the cross at the centre of the live view). All
   chips of a block share the stage's frame, so in the designer one AFM list covers the whole block (below).
-- **Loose 1 cm chips**: each chip on its own; mark each centre as for mounted chips (no corners).
+- **Loose 1 cm chips**: each chip on its own; mark each centre as for mounted chips (no corners). Their 10x focus
+  points focus on the chip, not the plastic holder beside it: in each autofocus sweep a height counts only where at
+  least 15 % of the picture is substrate colour (`focus_min_substrate_af`); the log says how many heights were left out.
 - **Larger pieces**: any size, the edges walked and fitted.
 - **Scan areas drawn by hand (polygons)**: no chip detection. Instead of the pieces window, a live view with a
   cross asks for the corners of each area to scan:
