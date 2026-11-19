@@ -799,7 +799,7 @@ class LiveScan:
         """The substrate level from the pooled blocks, and the oxide from its colour: LiveError (the analysis stops) if
         that is more than thickness.SUBSTRATE_MAX_REL from the entered oxide, or no oxide explains the colour (Avram,
         2026-10-29: thicknesses from a wrong oxide are wrong for every flake)."""
-        from .thickness import oxide_from_substrate, describe_substrate_oxide, substrate_oxide_problem
+        from .thickness import oxide_from_substrate, describe_substrate_oxide, substrate_oxide_problem, oxide_summary
         if not self.sub_pool and self.sub_all:
             self.sub_pool = list(self.sub_all)
         if self.sub_pool:
@@ -818,8 +818,12 @@ class LiveScan:
                 self.say(describe_substrate_oxide(r, self.oxide_entered))
                 why = substrate_oxide_problem(r, self.oxide_entered)
             if why:
-                raise LiveError(f"analysis stopped: {why}.  The thicknesses would be wrong.  (To analyse with the entered oxide "
-                                "anyway: --no-refine-oxide)")
+                e = LiveError(f"analysis stopped: {why}.  The thicknesses would be wrong.  (To analyse with the entered oxide "
+                              "anyway: --no-refine-oxide)")
+                # (2026-11-19) for <piece>_targets_failed.json: the microscope says at once that the oxide does not match
+                e.oxide = (oxide_summary(r, self.oxide_entered) if self.substrate is not None
+                           else dict(kind="no_substrate", entered_nm=self.oxide_entered, measured_nm=None))
+                raise e
             self.oxide_frozen = r["model_nm"]
             self.ox_samples = [r["nm"]]
             self.say(f"oxide fixed at {self.oxide_frozen:.1f} nm in the thin-film model ({r['nm']:g} nm on the nominal scale, from the "
@@ -1858,8 +1862,9 @@ def process_run(run_dir: Path, man_path: Path, a, out: Path, log=print):
             log(f"ERROR on {name}: {exc}.  No target list written for it; the other pieces go on.  Fix the problem and run "
                 "this command again: pieces with a target list are skipped.")
             try:
-                (run_dir / f"{name}{TARGETS_FAILED}").write_text(json.dumps({"error": str(exc),
-                                                                             "time": time.strftime("%Y-%m-%d %H:%M:%S")}))
+                (run_dir / f"{name}{TARGETS_FAILED}").write_text(json.dumps(dict(
+                    {"error": str(exc), "time": time.strftime("%Y-%m-%d %H:%M:%S")},
+                    **({"oxide": exc.oxide} if getattr(exc, "oxide", None) else {}))))
             except OSError as e:
                 log(f"  ({name}{TARGETS_FAILED} not written: {e})")
             failed_pieces.append(name)

@@ -2,6 +2,24 @@
 
 Notable changes to FlakeIdentifier. The scan program's version is shown in its window and logs (`py-YYYY-MM-DD<letter>`).
 
+## py-2026-11-19a
+
+- **Oxide way off the one entered: a message at once.** When the oxide measured from a chip's substrate colour is more
+  than 20 % from the one entered (or fits no oxide), the analysis skips that chip, as before. Until now the scan program
+  only said so when the whole analysis had ended. Now a window names the chip, the oxide entered and the one measured,
+  as soon as it is measured. The other chips go on.
+- **Wrong wafer recognised.** When the substrate's colour is that of another calibrated wafer (for example 285 nm entered
+  for a 90 nm chip), the check says "looks like 90 nm SiO2, not the 285 nm entered" instead of "the light is not as
+  calibrated". This applies both to the window before each chip's scan, now titled "Oxide does not match the one
+  entered", and to the analysis.
+- **Viewer:**
+  - The header shows the oxide measured and entered ("SiO₂ 272.5 nm measured (285 nm entered)").
+  - The rhombohedral colour-path shift (e.g. −12.5 nm) is no longer in the header, where it was read as the oxide; it
+    is in the header's hover text.
+  - The flake table is in nm only: with rhombohedral screening the t 10x / t 100x columns showed layer counts (24 for
+    8.2 nm). The headers say (nm), and the 100x thickness has its colour swatch too.
+  - The "coordinates remeasured" hover text no longer shows "undefined" for remeasures done in passes.
+
 ## py-2026-11-16a
 
 - The coordinate check (every 100x picture visited again in passes until two agreed, then the coordinates moved) is

@@ -221,11 +221,11 @@ class OxideError(RuntimeError):
     """The substrate's colour gives no oxide close to the entered one (stop: the thicknesses would be wrong)."""
 
 
-def oxide_from_substrate(rgb, entered_nm: float, search_rel: float = 0.25) -> dict | None:
+def oxide_from_substrate(rgb, entered_nm: float, search_rel: float = 0.25, _other: bool = True) -> dict | None:
     """The oxide that explains a substrate level rgb (any units: only R/G and B/G count), searched within search_rel of
     the entered (nominal) oxide, as dict(nm: nominal scale, model_nm: thin-film model, misfit, rg, bg, anchor_nm, ok:
-    within SUBSTRATE_MAX_REL of the entered one and the colour fits).  None: no anchor near the entered oxide, or a bad
-    rgb."""
+    within SUBSTRATE_MAX_REL of the entered one and the colour fits; other: when not ok, the same for another calibrated
+    wafer whose oxide does explain the colour).  None: no anchor near the entered oxide, or a bad rgb."""
     from .rhombo import _substrate_rgb
     rgb = np.asarray(rgb, float)
     entered = float(entered_nm)
@@ -254,8 +254,20 @@ def oxide_from_substrate(rgb, entered_nm: float, search_rel: float = 0.25) -> di
         m2, t2 = search(nom * 0.6, nom * 1.4)
         if m2 <= SUBSTRATE_MAX_MISFIT:
             mis, t = m2, t2
-    return dict(nm=t, model_nm=mod + t - nom, misfit=mis, rg=float(rg), bg=float(bg), anchor_nm=nom,
-                ok=bool(mis <= SUBSTRATE_MAX_MISFIT and abs(t / entered - 1) <= SUBSTRATE_MAX_REL))
+    r = dict(nm=t, model_nm=mod + t - nom, misfit=mis, rg=float(rg), bg=float(bg), anchor_nm=nom,
+             ok=bool(mis <= SUBSTRATE_MAX_MISFIT and abs(t / entered - 1) <= SUBSTRATE_MAX_REL))
+    if not r["ok"] and _other:
+        # (2026-11-19) way off: does the colour fit one of the other calibrated wafers?  Then the oxide entered is wrong
+        # (285 nm entered for a 90 nm chip gave "fits no oxide: the light is not as calibrated")
+        for a in SUBSTRATE_ANCHORS:
+            if a[0] != nom:
+                o = oxide_from_substrate(rgb, a[0], search_rel, _other=False)
+                # (close to that wafer's own oxide and a tight fit only: a 285 nm chip under bluer-poor light, B/G 0.80
+                # instead of 0.94, also fits ~105 nm)
+                if o is not None and o["ok"] and abs(o["nm"] / a[0] - 1) <= 0.12 and o["misfit"] <= SUBSTRATE_MAX_MISFIT / 2:
+                    r["other"] = o
+                    break
+    return r
 
 
 def describe_substrate_oxide(r, entered_nm) -> str:
@@ -273,6 +285,9 @@ def substrate_oxide_problem(r, entered_nm) -> str | None:
     if r is None:
         return (f"no oxide could be measured from the substrate colour for {entered:g} nm entered (only "
                 + ", ".join(f"{a[0]:g}" for a in SUBSTRATE_ANCHORS) + " nm wafers are calibrated)")
+    if r.get("other"):
+        return (f"the substrate colour (R/G {r['rg']:.3f}, B/G {r['bg']:.3f}) is that of {r['other']['nm']:g} nm SiO2, not of the "
+                f"{entered:g} nm entered: check the oxide entered for this piece (or the light)")
     if r["misfit"] > SUBSTRATE_MAX_MISFIT:
         return (f"the substrate colour (R/G {r['rg']:.3f}, B/G {r['bg']:.3f}) fits no oxide thickness (misfit {r['misfit']:.4f}, "
                 f"at most {SUBSTRATE_MAX_MISFIT}): the light is not as calibrated (lamp brightness, a filter, the aperture)")
@@ -280,6 +295,20 @@ def substrate_oxide_problem(r, entered_nm) -> str | None:
         return (f"the substrate colour gives {r['nm']:g} nm SiO2, {(r['nm'] / entered - 1) * 100:+.0f} % from the {entered:g} nm "
                 f"entered (more than {SUBSTRATE_MAX_REL * 100:.0f} %): check the oxide entered for this piece, and the light")
     return None
+
+
+def oxide_summary(r, entered_nm) -> dict:
+    """The oxide check for the microscope's message (2026-11-19): entered, measured (None: none fits) and the kind of
+    problem: "other_wafer" (the colour is another calibrated wafer's), "off" (more than SUBSTRATE_MAX_REL off), "no_fit"
+    (no oxide explains the colour: the light), "no_anchor" (no calibrated wafer near the entered oxide)."""
+    entered = float(entered_nm)
+    if r is None:
+        return dict(kind="no_anchor", entered_nm=entered, measured_nm=None)
+    if r.get("other"):
+        return dict(kind="other_wafer", entered_nm=entered, measured_nm=r["other"]["nm"])
+    if r["misfit"] > SUBSTRATE_MAX_MISFIT:
+        return dict(kind="no_fit", entered_nm=entered, measured_nm=None)
+    return dict(kind="off" if abs(r["nm"] / entered - 1) > SUBSTRATE_MAX_REL else "ok", entered_nm=entered, measured_nm=r["nm"])
 
 
 def refine_oxide(samples: np.ndarray, material: str, oxide_nm: float, profile: dict,

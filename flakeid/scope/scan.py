@@ -31,7 +31,7 @@ import numpy as np
 from .settings import Settings, dump
 from flakeid.fieldmosaic import field_size_um, fmt_matrix, format_poly, parse_poly, plan_fields
 
-VERSION = "py-2026-11-17a"
+VERSION = "py-2026-11-19a"
 NAN = float("nan")
 MANUAL_RETAKE = "Manual focus (retakes)"       # the 100x window's button: a retake focused by hand
 IDX100_HEADER = ("order,label,stage_x_um,stage_y_um,z_um,z_drive,z10_um,offset_um,focus,af_ratio,saturated_frac,file,shift_files,"
@@ -2969,6 +2969,61 @@ class Scanner:
             return "see analysis_log.txt"
         return None
 
+    def failed_piece_message(self, name, d):
+        """(title, text) for the message when the analysis could not analyse a piece (d: its _targets_failed.json); the
+        oxide check in plain words (2026-11-19: the oxide measured from the substrate colour way off the one entered)."""
+        ox = d.get("oxide") or {}
+        k, ent, meas = ox.get("kind"), ox.get("entered_nm"), ox.get("measured_nm")
+        tail = (f"\n\n{name} is not analysed: no target list and no 100x pictures of it.  The other chips go on.  "
+                f"Details: analysis_log.txt in {self.analysis_out}.")
+        if k == "other_wafer" and meas and ent:
+            return (f"Oxide does not match: {name}",
+                    f"The substrate of {name} looks like {meas:g} nm SiO2, but {ent:g} nm was entered.\n\n"
+                    "Check the oxide entered for this chip (or the light: lamp, filters, aperture)." + tail)
+        if k == "off" and meas and ent:
+            return (f"Oxide does not match: {name}",
+                    f"The substrate colour of {name} gives {meas:g} nm SiO2, {(meas / ent - 1) * 100:+.0f} % from the {ent:g} nm "
+                    "entered.\n\nCheck the oxide entered for this chip, and the light (lamp, filters, aperture)." + tail)
+        if k == "no_fit" and ent:
+            return (f"Oxide does not match: {name}",
+                    f"The substrate colour of {name} fits no oxide thickness near the {ent:g} nm entered.\n\n"
+                    "Check the light (lamp brightness, filters, aperture) and the oxide entered for this chip." + tail)
+        if k == "no_anchor" and ent:
+            return (f"Oxide not calibrated: {name}",
+                    f"No calibrated wafer is near the {ent:g} nm oxide entered for {name}: the oxide cannot be checked.  "
+                    "Check the oxide entered." + tail)
+        if k == "no_substrate":
+            return (f"Oxide not measured: {name}", f"No bare substrate was found on {name} to measure the oxide from." + tail)
+        return (f"Analysis: {name} not analysed", f"The analysis could not analyse {name}: {d.get('error') or 'see the log'}" + tail)
+
+    def _announce_failed(self, shown):
+        """A message at once for each piece the analysis gave up on since the last call (shown: the pieces already told;
+        before 2026-11-19 only a log line until the whole analysis ended, a whole run later)."""
+        if not getattr(self, "run_dir", None):
+            return
+        for p in self.pieces or ():
+            name = p.get("name")
+            if not name or name in shown:
+                continue
+            f = Path(self.run_dir) / f"{name}_targets_failed.json"
+            try:
+                if not f.is_file():
+                    continue
+                d = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            shown.add(name)
+            title, msg = self.failed_piece_message(name, d if isinstance(d, dict) else {})
+            self.say(f"  WARNING: {title}: " + msg.replace("\n\n", "  "))
+            import threading                         # (the message waits for OK; the log is still followed meanwhile)
+            threading.Thread(target=self._message_safe, args=(title, msg), daemon=True).start()
+
+    def _message_safe(self, title, msg):
+        try:
+            self.ui.message(title, msg)
+        except Exception:
+            pass
+
     def _let_analysis_go(self):
         """The ended analysis process let go (no waiting for it at the end); its exit code kept: analysis_ended()."""
         if self.analysis is not None:
@@ -2996,6 +3051,7 @@ class Scanner:
                 "scan complete", "100x", "File \"")
         last_error = ""
         A = self.ana_state = dict(waiting=False)
+        shown = self.failed_shown = getattr(self, "failed_shown", set())     # (kept across restarts of the analysis)
         while True:
             try:
                 with open(logp, encoding="utf-8", errors="replace") as fh:
@@ -3016,6 +3072,10 @@ class Scanner:
                         pass
             if A["waiting"]:
                 self._ana_show(A)
+            try:
+                self._announce_failed(shown)
+            except Exception:
+                pass
             if proc.poll() is not None:
                 n_re = getattr(self, "analysis_restarts", 0)
                 if (proc.returncode == 1 and self.analysis is proc and n_re < self.s.analysis_restarts and not self.stop_all
@@ -3032,6 +3092,8 @@ class Scanner:
                     # (exit 2 also when it went through every chip but could not analyse some: <chip>_targets_failed.json)
                     bad = [p["name"] for p in (self.pieces or ()) if self.analysis_gave_up(
                            Path(self.run_dir) / f"{p['name']}_targets.csv") is not None] if getattr(self, "run_dir", None) else []
+                    if bad and all(b in shown for b in bad):
+                        return                           # (each one has had its own message already)
                     if bad:
                         title = "Analysis: chips not analysed"
                         msg = (f"The analysis on this PC could not analyse {', '.join(bad)}: no target list, so no 100x pictures "
@@ -4698,7 +4760,11 @@ class Scanner:
                     pass
                 self._substrate_ok = True
                 return
-            a = self.ui.confirm("Substrate colour not as expected", msg, ("Check again", "Continue anyway", "Stop"))
+            # (2026-11-19) the colour fits an oxide, just not the one entered (or another calibrated wafer's): say so
+            from flakeid.thickness import SUBSTRATE_MAX_MISFIT
+            title = ("Oxide does not match the one entered" if why and est is not None
+                     and (est.get("other") or est["misfit"] <= SUBSTRATE_MAX_MISFIT) else "Substrate colour not as expected")
+            a = self.ui.confirm(title, msg, ("Check again", "Continue anyway", "Stop"))
             if a == 0:
                 self.REF = self.reference(self.blocks())
                 continue

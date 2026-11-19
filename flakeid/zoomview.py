@@ -225,7 +225,11 @@ def write_viewer_page(out, info, result, tpolys, fpolys, stage_map=None, verbose
                 stage_sign=result.params.get("stage_axis_sign", [1, 1]),
                 stage_map=stage_map or _stage_map(result),
                 image_only=bool(result.params.get("image_only")), rhombo=bool(result.params.get("rhombo")),
-                rhombo_shift=result.params.get("rhombo_oxide_shift_nm"))
+                rhombo_shift=result.params.get("rhombo_oxide_shift_nm"),
+                # (2026-11-19) the oxide measured from the substrate colour and the one entered, both on the wafers'
+                # nominal scale, for the page's header (the rhombohedral shift, -12.5 nm, was read as the oxide)
+                oxide_meas=(result.params.get("oxide_blocks") or [None])[0],
+                oxide_entered=result.params.get("oxide_entered_nm"))
     import shutil
     vend = Path(__file__).parent / "vendor"
     shutil.copy(vend / "openseadragon.min.js", out / "openseadragon.min.js")
@@ -430,7 +434,7 @@ body.imgonly #bEnh,body.imgonly #bOut,body.imgonly #bLab{display:none}
    <button class="tb" id="bBig" hidden title="Show the 100x image large, with the chip map small (L)">Large 100x</button>
    <div id="nf"><span id="nft"></span><button id="bFR2" hidden>clear filters</button></div>
   </div>
-  <div id="tbl"><table class="noxy"><thead><tr><th class="rn" title="Row number in the current order">#</th><th data-k="id">flake</th><th data-k="score" title="10x score: learned from your labels of which flakes were worth imaging (0-1), from the 10x scan">10x</th><th data-k="s100" class="s1" title="100x score (0-1, as the 10x score): the largest clean area in the flake's 100x picture (no step edges, glue / debris, bubbles or folds), on a log scale: 80 µm² 0, 400 µm² 0.29, 1000 µm² 0.46, 5000 µm² 0.75, 20000 µm² or more 1. Hover a value for the area">100x</th><th data-k="t" title="Thickness of the flake's best terrace from the 10x scan (nm)">t 10x</th><th data-k="t100" class="s1" title="Thickness of the best terrace from its 100x picture's colour (nm; flakeid.thick100, the best fit, found without the 10x one). Orange: the 10x thickness fits only another reading (the colour repeats at 100x); red: it fits none. Hover a value for the readings">t 100x</th><th data-k="glue" class="s1" title="Glue (tape residue) on the best terrace in its 100x picture: the share of the terrace it covers, 0 none, 1 everywhere">glue</th><th data-k="n" class="nt" title="Number of terraces">terr.</th><th data-k="area" title="Flake area (µm²)">area</th><th data-k="bd" title="Diameter of the best terrace (µm)">Ø µm</th><th data-k="cx" class="xy">X µm</th><th data-k="cy" class="xy">Y µm</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <div id="tbl"><table class="noxy"><thead><tr><th class="rn" title="Row number in the current order">#</th><th data-k="id">flake</th><th data-k="score" title="10x score: learned from your labels of which flakes were worth imaging (0-1), from the 10x scan">10x</th><th data-k="s100" class="s1" title="100x score (0-1, as the 10x score): the largest clean area in the flake's 100x picture (no step edges, glue / debris, bubbles or folds), on a log scale: 80 µm² 0, 400 µm² 0.29, 1000 µm² 0.46, 5000 µm² 0.75, 20000 µm² or more 1. Hover a value for the area">100x</th><th data-k="t" title="Thickness of the flake's best terrace from the 10x scan (nm)">t 10x (nm)</th><th data-k="t100" class="s1" title="Thickness of the best terrace from its 100x picture's colour (nm; flakeid.thick100, the best fit, found without the 10x one). Orange: the 10x thickness fits only another reading (the colour repeats at 100x); red: it fits none. Hover a value for the readings">t 100x (nm)</th><th data-k="glue" class="s1" title="Glue (tape residue) on the best terrace in its 100x picture: the share of the terrace it covers, 0 none, 1 everywhere">glue</th><th data-k="n" class="nt" title="Number of terraces">terr.</th><th data-k="area" title="Flake area (µm²)">area</th><th data-k="bd" title="Diameter of the best terrace (µm)">Ø µm</th><th data-k="cx" class="xy">X µm</th><th data-k="cy" class="xy">Y µm</th></tr></thead><tbody id="rows"></tbody></table></div>
   <div id="detail">Click a flake (row or outline) for its details.</div>
  </div>
 </div>
@@ -461,11 +465,12 @@ function cmap(x){x=Math.max(0,Math.min(1,x))*(MAGMA.length-1);const i=Math.min(M
 const col=t=>cmap((t-D.tmin)/Math.max(D.tmax-D.tmin,1e-6));
 $('title').textContent=D.name;
 const N100=H100?D.flakes.filter(f=>H100[f.id]).length:0;
-$('subt').textContent=D.image_only?'10x image only (the flakes were not analysed)':`${D.material}${D.rhombo?' · rhombohedral screening'+(D.rhombo_shift?` (oxide ${D.rhombo_shift>0?'+':''}${D.rhombo_shift} nm from the calibration wafers)`:''):''} · ${D.flakes.length} flakes`+(H100?` · ${N100} with 100x`:'')
-if(D.remeasured){const r=D.remeasured;$('subt').textContent+=` · coordinates remeasured ${r.date}`;$('subt').title=`The chip was scanned at 10x again (${r.new_scan}) and its flakes found: it had turned ${r.rot_deg}° and moved ${r.shift_um[0]}, ${r.shift_um[1]} µm (fit rms ${r.rms_um} µm; ${r.flakes_confirmed} flakes confirmed).  All microscope coordinates on this page are the new ones.`}
+$('subt').textContent=D.image_only?'10x image only (the flakes were not analysed)':`${D.material}${D.oxide_entered?` · SiO₂ ${D.oxide_meas!=null?`${D.oxide_meas} nm measured (${D.oxide_entered} nm entered)`:`${D.oxide_entered} nm entered`}`:''}${D.rhombo?' · rhombohedral screening':''} · ${D.flakes.length} flakes`+(H100?` · ${N100} with 100x`:'')
+if(!D.image_only&&D.rhombo&&D.rhombo_shift)$('subt').title=`Rhombohedral screening: the graphite colour paths are moved for the chip's oxide, ${D.rhombo_shift>0?'+':''}${D.rhombo_shift} nm from the calibration wafers' (a correction, not the oxide thickness)`
+if(D.remeasured){const r=D.remeasured;$('subt').textContent+=` · coordinates remeasured ${r.date}`;$('subt').title=(r.new_scan!=null?`The chip was scanned at 10x again (${r.new_scan}) and its flakes found: it had turned ${r.rot_deg}° and moved ${r.shift_um[0]}, ${r.shift_um[1]} µm (fit rms ${r.rms_um} µm; ${r.flakes_confirmed} flakes confirmed).`:`The chip's flakes were looked for again at 10x${r.found!=null?` (${r.found} of ${r.remeasured} found)`:''}: it had turned ${r.rot_deg}° and moved ${r.shift_um[0]}, ${r.shift_um[1]} µm.`)+'  All microscope coordinates on this page are the new ones.'}
 // rhombohedral screening (flakeid.rhombo)
 function tTxt(t){return `${t} nm`}
-if(D.rhombo){const s1=document.querySelector('th[data-k="score"]');if(s1)s1.title='10x score (rhombohedral screening): the size of the best terrace\'s clean core (less 2.5 µm along its edge) at 3-25 layers; 400 µm² 0.29, 1000 µm² 0.46, 5000 µm² 0.75, 20000 µm² 1'}
+if(D.rhombo){const s1=document.querySelector('th[data-k="score"]');if(s1)s1.title='10x score (rhombohedral screening): the size of the best terrace\'s clean core (less 2.5 µm along its edge) at 1.0-8.4 nm; 400 µm² 0.29, 1000 µm² 0.46, 5000 µm² 0.75, 20000 µm² 1'}
 if(D.image_only){document.body.classList.add('imgonly');$('detail').textContent='The 10x scan without the flake analysis: the stitched 10x image only. The bottom right shows the microscope coordinates of the point under the cursor.'}
 $('legend').style.background=`linear-gradient(90deg,${MAGMA.join(',')})`;
 $('lg0').textContent=D.tmin;$('lg1').textContent=D.tmax;$('fT0').value=D.tmin;$('fT1').value=D.tmax;
@@ -648,12 +653,15 @@ function draw(){const rows=D.flakes.filter(visible).sort((a,b)=>{const x=a[sortK
  const nf=nFilters();$('bFil').textContent=nf?`Filter (${nf})`:'Filter';$('bFil').classList.toggle('on',nf>0);
  $('bFR2').hidden=!nf;$('nft').textContent=`${rows.length} of ${D.flakes.length} flakes shown`;sortMenu();
  // (the row number: the place in the current order, whatever the sort and the filters)
- $('rows').innerHTML=rows.map((f,i)=>`<tr data-id="${f.id}" class="${f.id===selId?'sel':''}"><td class="rn">${i+1}</td><td>${f.id}${H100&&H100[f.id]&&f.s100==null?'<span class="h1b">100x</span>':''}</td><td>${fmtS(f.score)}</td><td class="s1" title="${f.s100a==null?'':'largest clean area '+Math.round(f.s100a)+' µm²'}">${f.s100==null?'':fmtS(f.s100)}</td><td><span class="sw" style="background:${col(f.t)}"></span>${D.rhombo?Math.round(f.t/0.335):f.t}</td><td class="s1 ${t100Cls(f.t100i)}" title="${t100Txt(f.t100i)}">${f.t100==null?'':(D.rhombo?Math.round(f.t100/0.335):Math.round(f.t100))+(f.t100i&&f.t100i.alts&&f.t100i.alts.length?'*':'')}</td><td class="s1">${f.glue==null?'':f.glue.toFixed(2)}</td><td class="nt">${f.n}</td><td>${f.area.toFixed(0)}</td><td>${f.bd.toFixed(0)}</td><td class="xy">${f.cx==null?'':fmt1(f.cx)}</td><td class="xy">${f.cy==null?'':fmt1(f.cy)}</td></tr>`).join('');
+ $('rows').innerHTML=rows.map((f,i)=>`<tr data-id="${f.id}" class="${f.id===selId?'sel':''}"><td class="rn">${i+1}</td><td>${f.id}${H100&&H100[f.id]&&f.s100==null?'<span class="h1b">100x</span>':''}</td><td>${fmtS(f.score)}</td><td class="s1" title="${f.s100a==null?'':'largest clean area '+Math.round(f.s100a)+' µm²'}">${f.s100==null?'':fmtS(f.s100)}</td><td><span class="sw" style="background:${col(f.t)}"></span>${fmtT(f.t)}</td><td class="s1 ${t100Cls(f.t100i)}" title="${t100Txt(f.t100i)}">${f.t100==null?'':`<span class="sw" style="background:${col(f.t100)}"></span>`+fmtT(f.t100)+(f.t100i&&f.t100i.alts&&f.t100i.alts.length?'*':'')}</td><td class="s1">${f.glue==null?'':f.glue.toFixed(2)}</td><td class="nt">${f.n}</td><td>${f.area.toFixed(0)}</td><td>${f.bd.toFixed(0)}</td><td class="xy">${f.cx==null?'':fmt1(f.cx)}</td><td class="xy">${f.cy==null?'':fmt1(f.cy)}</td></tr>`).join('');
  $('rows').querySelectorAll('tr').forEach(tr=>tr.onclick=()=>select(+tr.dataset.id,true));sync()}
 // 100x (and stacking-domain) images of a flake, written by flakeid.hundred after the 100x imaging
 // views of a 100x image: key, label, panel image, full image.  "avg": the frame-averaged main image alone, without the
 // two shifted frames (written by flakeid.hundred from 2026-10-04); "ir": the flake's IR (stacking-domain) picture laid
 // over the 100x frame (from 2026-10-15)
+// (2026-11-19) the table in nm only (it showed layers with rhombohedral screening: 24 for 8.2 nm, next to the colour
+// of 8.2 nm on the thickness scale); the 100x thickness has its swatch on the same scale too
+function fmtT(v){return v==null?'':v<10?(+v).toFixed(1):String(Math.round(v))}
 const VIEWS=[['nat','natural','p','f'],['lin','linear','p','f'],['c8','colour ±8 %','c8','c8'],['sg','green ±4 %','sg','sg'],['deb','debris','deb','deb'],
  ['a','natural · avg frame','a','a'],['a_c8','colour · avg frame','a_c8','a_c8'],['a_sg','green · avg frame','a_sg','a_sg'],
  ['ir','IR · stacking domains','ir','ir'],['mos','mosaic','mp','mos'],['irmos','IR mosaic','irmos','irmos']];
@@ -744,7 +752,7 @@ function select(id,zoom){selId=id;const o=byId[id];if(!o)return;const f=o.f;
  const tl=f.terr.map(tid=>{const T=D.terraces[tid];if(!T)return'';return `<div class="trow" data-t="${tid}"><span class="sw" style="background:${col(T.t)}"></span><b>${tTxt(T.t)}</b>${T.alt?' (alt '+T.alt+')':''} · Ø ${T.d} µm · ${Math.round(T.area)} µm²${D.rhombo&&T.core!=null?' · clean core '+T.core+' µm²':''} · 10x score ${fmtS(T.score)}${T.q!=='good'?' · <i>'+T.q.replace(/;/g,', ')+'</i>':''}</div>`}).join('');
  const more=`focus ${f.focus??'–'} µm · crowding ${f.crowd} · in window ${Math.round(100*(f.fw||0))} % · thick ${Math.round(100*(f.fthick||0))} %`;
  $('detail').innerHTML=`<b title="${more}">Flake ${f.id}</b> · 10x score ${fmtS(f.score)}${f.s100!=null?` · <b>100x score ${fmtS(f.s100)}</b> (${Math.round(f.s100a)} µm²)`:''}${f.t100i?`<br>thickness: 10x <b>${f.t100i.t10??f.t} nm</b> · 100x <b class="${t100Cls(f.t100i)}" title="${t100Txt(f.t100i)}">${f.t100i.t} nm</b>${f.t100i.alts&&f.t100i.alts.length?' (also fits '+f.t100i.alts.join(', ')+')':''}${f.t100i.agree==='no'?' · <b class="t1n">do not agree</b>':''}`:''}${f.glue!=null?` · glue <b>${f.glue.toFixed(2)}</b>`:''} · ${f.L}×${f.W} µm · ${Math.round(f.area)} µm²${st}${rel}
- ${D.rhombo&&D.terraces[f.terr[0]]&&D.terraces[f.terr[0]].fcore!=null?`<br>right-colour area (3–25 layers, connected, less 2.5 µm along its edge): <b>${D.terraces[f.terr[0]].fcore} µm²</b>`:''}
+ ${D.rhombo&&D.terraces[f.terr[0]]&&D.terraces[f.terr[0]].fcore!=null?`<br>right-colour area (1.0–8.4 nm, connected, less 2.5 µm along its edge): <b>${D.terraces[f.terr[0]].fcore} µm²</b>`:''}
  <div class="lbl2">Terraces — click to zoom</div>${tl}`;
  card100();showBig();vbar();wireCopy($('detail'));
  // a terrace: back to the map (from the large 100x view), zoomed onto it and outlined (before 2026-10-27 the zoom was

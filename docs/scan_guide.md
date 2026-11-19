@@ -435,6 +435,13 @@ wrong: LH_G_049_test_run_2 was scanned with red/green 0.79 instead of ~0.50 (and
 - **Continue anyway**: scans with this light (not asked again in this run); the flakes' colours will be off. **Stop**
   ends the job.
 
+When the colour is that of another calibrated wafer, the window is titled **Oxide does not match the one entered** and
+names it ("is that of 90 nm SiO2, not of the 285 nm entered").
+
+During the scan the analysis measures the oxide again from the chip's first blocks. If it is more than 20 % from the one
+entered (or no oxide fits), that chip is not analysed (no target list, no 100x pictures). A window says so as soon as it
+is measured: **Oxide does not match: <chip>**, with the oxide entered and the one measured. The other chips go on.
+
 The expected colours come from the flat-field references (`profiles/substrate_refs.json`: 10x on 285 nm wafers); an oxide
 with none is not checked. Settings: `substrate_colour_check` (auto: on the microscope,
 off on the simulator; on; off), `substrate_colour_tol`, `substrate_brightness_tol`.
