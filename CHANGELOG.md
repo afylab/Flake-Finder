@@ -2,6 +2,20 @@
 
 Notable changes to FlakeIdentifier. The scan program's version is shown in its window and logs (`py-YYYY-MM-DD<letter>`).
 
+## py-2026-11-21a
+
+- **Faint hBN steps are found.** One- and two-layer steps (about a 1 % colour change on thick hBN) are as large as the
+  per-pixel noise, so the debris / step threshold (2.5 % colour) and the fine-terrace levels missed them: flakes with
+  many steps kept a large clean area and a high score. A new oriented step-edge filter (`screen100.step_edges`)
+  averages the raw red, green and blue contrast (each scaled by its own noise) along ~10 um in thin bands either side
+  of each direction and keeps sharp jumps, not smooth background blotches or lines (folds). It does not use the
+  thin-film model: on 285 nm oxide the model's predicted colour change per nm is off (the steps show mostly in red and
+  green, the model expects blue), and projecting onto it lost most of a step's contrast. Each found edge is carried on
+  to the flake edge or the next step (a step cannot end inside a terrace). The edges cut the clean area of the 100x
+  score, are drawn in orange in the `_debris` picture and are stored in `_regions.json` (`step_lines`,
+  `step_lines_stage_um`). New features `step_n` and `step_len_density` (not used by the screening model until it is
+  refitted).
+
 ## py-2026-11-19b
 
 - **Loose 1 cm chips: focus on the chip, not the holder.** In each 10x focus point's autofocus sweep, a height counts as

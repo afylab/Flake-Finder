@@ -454,7 +454,8 @@ def _thickness(row):
 
 def overlay(rgb8, regions):
     """BGR copy of the natural image with the terrace of interest (white), its debris (magenta) and larger areas of
-    another thickness (steps, cyan) outlined, and the clean area the 100x score measures (green; screen100.clean_score)."""
+    another thickness (steps, cyan) outlined, faint step edges (orange), and the clean area the 100x score measures
+    (green; screen100.clean_score)."""
     o = cv2.cvtColor(rgb8, cv2.COLOR_RGB2BGR)
     for p in regions["terrace"]:
         cv2.polylines(o, [np.round(np.array(p).reshape(-1, 2)).astype(np.int32)], True, (255, 255, 255), 2, cv2.LINE_AA)
@@ -466,6 +467,10 @@ def overlay(rgb8, regions):
         for p in f["poly"]:
             cv2.polylines(o, [np.round(np.array(p).reshape(-1, 2)).astype(np.int32)], True,
                           (0, 230, 255) if f["dt_nm"] > 0 else (255, 160, 0), 2, cv2.LINE_AA)
+    for s in regions.get("step_lines", []):                 # faint step edges (hBN): orange (BGR)
+        cv2.polylines(o, [np.round(np.array(s["line"]).reshape(-1, 2)).astype(np.int32)], False, (0, 140, 255), 2, cv2.LINE_AA)
+        for e in s.get("ext", []):                          # (carried on to the edge / next step: thinner)
+            cv2.line(o, (int(round(e[0])), int(round(e[1]))), (int(round(e[2])), int(round(e[3]))), (0, 140, 255), 1, cv2.LINE_AA)
     for p in (regions.get("score100") or {}).get("poly", []):
         cv2.polylines(o, [np.round(np.array(p).reshape(-1, 2)).astype(np.int32)], True, (60, 220, 60), 3, cv2.LINE_AA)
     return o
@@ -748,6 +753,7 @@ def _write_one(r):
     c8, sg = extra["c8"], extra["sg"]
     reg["fine"] = extra["fine"]
     reg["wrinkles"] = extra["wrinkles"]
+    reg["step_lines"] = extra.get("step_lines", [])     # (hBN: faint step edges, screen100.step_edges)
     reg["screen"] = screen_record(screen, feat, material)
     if _CTX.get("rhombo"):
         # rhombohedral screening: the learned screen (fitted on graphite on 90 nm oxide) does not apply; thin graphite
@@ -776,6 +782,8 @@ def _write_one(r):
         terrace_stage_um=to_stage(reg["terrace"], sxy, wh), debris_stage_um=to_stage(reg["debris"], sxy, wh),
         steps_stage_um=to_stage(reg["steps"], sxy, wh),
         fine_stage_um=[dict(f, poly=to_stage(f["poly"], sxy, wh)) for f in reg.get("fine", [])],
+        step_lines_stage_um=[dict(s, line=to_stage([s["line"]], sxy, wh)[0], ext=to_stage(s.get("ext") or [], sxy, wh))
+                             for s in reg.get("step_lines", [])],
         oxide_nm=oxide_nm,
         shift_frames=len(resid), shift_alignment=resid,
         shift_used=bool(resid) and all(q[2] >= SHIFT_MIN_SCORE for q in resid),
