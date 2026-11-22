@@ -281,6 +281,174 @@ def bubbles(rf, T, px_um, dev_thr):
     return cnt, float(keep.sum() / max(T.sum(), 1)), keep
 
 
+# Step edges (hBN, 2026-11-21).  One-layer steps change the colour by ~1 %, about the per-pixel noise, so neither the
+# debris / step threshold of hundred.analyse (2.5 % colour) nor the level threshold of fine_terraces (smooth background
+# blotches pass it, faint steps do not) can find them pixel by pixel.  They are found from the raw contrast of each
+# colour channel, not from the thin-film model's dt: on 285 nm oxide the model's direction of colour change per nm is
+# off (70-95 nm hBN: red predicted flat, while the steps Jordan saw, bn_112026_3 F067, a large step, show mostly in red
+# and green and hardly in blue), so projecting onto it threw most of a step's contrast away.  Each channel (relative
+# to the terrace colour) is divided by its own pixel noise.  A step is long, straight and sharp: an oriented filter
+# averages along a direction (sigma STEP_ALONG_UM) in thin bands (sigma STEP_ACROSS_UM) and compares the bands at
+# +-STEP_K1_UM (near) and +-STEP_K2_UM (far), as 3-channel vectors.  A step gives near = far; a smooth ramp
+# (background blotch) far = (K2 / K1) near; a line (wrinkle, fold) near ~ far ~ 0.  The response
+# min(|near|, |far|) - |far - near| (near . far > 0) keeps the jump and rejects the slope.  Pixels above
+# max(STEP_MIN_S, median + STEP_Z x the response's spread on the flake), in long thin components (STEP_MIN_LEN_UM),
+# are step edges; they cut the clean area of the 100x score.  Simulated frames (0.6-0.8 % pixel noise, 0.2 %
+# blotches): a 0.3 % step is found over its whole length, pure noise gives no line.  (bn_112026_run_1/_5: the steps
+# Jordan saw in high contrast, bn_112026_7 F010 "tons of steps", had been left in a 67 um clean area with p_keep 0.94.)
+STEP_DS = 0.5                  # working scale
+STEP_ALONG_UM = 3.0            # sigma along the edge
+STEP_ACROSS_UM = 0.35          # sigma across, of each band
+STEP_K1_UM = 0.8               # near bands, either side of the edge
+STEP_K2_UM = 2.0               # far bands
+STEP_N_ANG = 16                # directions (11.25 deg)
+STEP_MIN_S = 0.08              # smallest response counted (in units of the pixel noise)
+STEP_Z = 5.0                   # ... and at least this many spreads above the flake's median response
+STEP_MIN_LEN_UM = 6.0          # shortest step edge kept
+STEP_EDGE_UM = 2.0             # not looked for this close to the terrace edge (blurred outline)
+STEP_EXTEND_UM = 25.0          # each end carried on to the terrace edge or another step, at most this far
+
+
+def _channel_noise(rf, T):
+    """Pixel noise of each channel of rf inside the terrace (robust spread of its high-pass)."""
+    inside = cv2.erode(T.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)
+    if inside.sum() < 500:
+        inside = T.astype(bool)
+    s = []
+    for ch in range(3):
+        c = rf[..., ch].astype(np.float32)
+        v = (c - cv2.GaussianBlur(c, (0, 0), 3.0))[inside]
+        s.append(1.4826 * float(np.median(np.abs(v - np.median(v)))) + 1e-6)
+    return s
+
+
+def step_response(rf, T, px_um):
+    """Oriented step-edge response (in pixel-noise units) at STEP_DS of rf (each channel relative to the terrace
+    colour) inside terrace T; (response, the terrace shrunk off its edge, pixel size) at the working scale."""
+    h0, w0 = T.shape
+    w, h = max(1, int(w0 * STEP_DS)), max(1, int(h0 * STEP_DS))
+    px = px_um / STEP_DS
+    sig = _channel_noise(rf, T)
+    Ts = cv2.resize(T.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST).astype(bool)
+    e = max(1, int(round(STEP_EDGE_UM / px)))
+    F = cv2.erode(Ts.astype(np.uint8), np.ones((2 * e + 1,) * 2, np.uint8), borderType=cv2.BORDER_CONSTANT,
+                  borderValue=0).astype(bool)
+    Tf = Ts.astype(np.float32)
+    chans = []
+    for ch in range(3):
+        d = cv2.resize(np.nan_to_num((rf[..., ch] - 1.0) / sig[ch]).astype(np.float32), (w, h), interpolation=cv2.INTER_AREA)
+        # outside the terrace its local level: the flake's outline is not a step
+        lvl = cv2.GaussianBlur(d * Tf, (0, 0), 15) / np.maximum(cv2.GaussianBlur(Tf, (0, 0), 15), 1e-3)
+        chans.append(np.where(Ts, d, lvl).astype(np.float32))
+    sa, sc = STEP_ALONG_UM / px, STEP_ACROSS_UM / px
+    k1, k2 = max(1, int(round(STEP_K1_UM / px))), max(2, int(round(STEP_K2_UM / px)))
+    D = int(np.ceil(np.hypot(h, w))) + 2
+    best = np.zeros((h, w), np.float32)
+    for a in np.linspace(0.0, 180.0, STEP_N_ANG, endpoint=False):
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), float(a), 1.0)
+        M[:, 2] += [(D - w) / 2, (D - h) / 2]
+        nn = np.zeros((D, D), np.float32)
+        ff = np.zeros((D, D), np.float32)
+        nf = np.zeros((D, D), np.float32)
+        dd = np.zeros((D, D), np.float32)
+        for c in chans:
+            R = cv2.warpAffine(c, M, (D, D), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            B = cv2.GaussianBlur(R, (0, 0), sigmaX=sa, sigmaY=sc)
+            n = np.roll(B, -k1, axis=0) - np.roll(B, k1, axis=0)
+            f = np.roll(B, -k2, axis=0) - np.roll(B, k2, axis=0)
+            nn += n * n
+            ff += f * f
+            nf += n * f
+            dd += (f - n) ** 2
+        S = np.where(nf > 0, np.minimum(np.sqrt(nn), np.sqrt(ff)) - np.sqrt(dd), 0.0).astype(np.float32)
+        best = np.maximum(best, cv2.warpAffine(S, cv2.invertAffineTransform(M), (w, h), flags=cv2.INTER_LINEAR))
+    return best, F, px
+
+
+def step_edges(rf, T, px_um):
+    """Step edges in the terrace: (mask at full resolution, [dict(len_um, s: response in pixel-noise units,
+    line: polyline in frame pixels, ext: the ends carried on)])."""
+    from scipy import ndimage
+    from skimage.morphology import skeletonize
+    best, F, px = step_response(rf, T, px_um)
+    if F.sum() < 200:
+        return np.zeros(T.shape, bool), []
+    rv = best[F]
+    med = float(np.median(rv))
+    thr = max(STEP_MIN_S, med + STEP_Z * 1.4826 * float(np.median(np.abs(rv - med))))
+    lab, _ = ndimage.label((best > thr) & F, structure=np.ones((3, 3)))
+    keep = np.zeros(F.shape, bool)
+    out = []
+    for i, sl in enumerate(ndimage.find_objects(lab), start=1):
+        if sl is None:
+            continue
+        comp = lab[sl] == i
+        ys, xs = np.nonzero(comp)
+        if len(ys) < 5:
+            continue
+        ev, evec = np.linalg.eigh(np.cov(np.c_[xs, ys].T))
+        length = 4 * np.sqrt(max(ev[1], 0)) * px
+        if length < STEP_MIN_LEN_UM or ev[0] / max(ev[1], 1e-9) > 0.08:     # long and thin only
+            continue
+        keep[sl] |= comp
+        v = evec[:, 1]
+        sk = skeletonize(comp)
+        sy, sx = np.nonzero(sk)
+        if len(sy) < 2:
+            sy, sx = ys, xs
+        X = np.c_[sx + sl[1].start, sy + sl[0].start].astype(float)
+        t = (X - X.mean(0)) @ v
+        o = np.argsort(t)
+        X, t = X[o], t[o]
+        nb = max(2, int(length / 3))
+        edges = np.linspace(t[0], t[-1] + 1e-6, nb + 1)
+        pts = [X[(t >= edges[j]) & (t < edges[j + 1])].mean(0) for j in range(nb) if np.any((t >= edges[j]) & (t < edges[j + 1]))]
+        out.append(dict(len_um=round(float(length), 1), s=round(float(np.median(best[sl][comp])), 2),
+                        line=[round(float(c) / STEP_DS, 1) for p in pts for c in p]))
+    full = cv2.resize(keep.astype(np.uint8), (T.shape[1], T.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+    _extend_steps(out, full, T, px_um)
+    return full, out
+
+
+def _extend_steps(lines, mask, T, px_um):
+    """A step edge cannot end inside a terrace: it runs to the flake's edge or into another step.  The filter finds its
+    clearest straight stretch; each end is carried on along its direction to the terrace edge or another step edge
+    (at most STEP_EXTEND_UM), drawn into mask (in place) and stored as the line's "ext" ([x0, y0, x1, y1] per end)."""
+    h, w = T.shape
+    cap = STEP_EXTEND_UM / px_um
+    _, lab = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+    for s in lines:
+        q = np.array(s["line"], float).reshape(-1, 2)
+        if len(q) < 2:
+            continue
+        own = set()                                   # (the line's own pixels: not "another step")
+        for x, y in np.round(q).astype(int):
+            win = lab[max(0, y - 4):y + 5, max(0, x - 4):x + 5]
+            own.update(int(v) for v in np.unique(win) if v)
+        other = (lab > 0) & ~np.isin(lab, list(own))
+        ext = []
+        for a, b in ((q[0], q[min(1, len(q) - 1)]), (q[-1], q[max(len(q) - 2, 0)])):
+            v = a - b
+            n = float(np.hypot(*v))
+            if n < 1e-6:
+                continue
+            v /= n
+            end = a.copy()
+            k = 3.0                                   # (clear of the line's own pixels)
+            while k <= cap:
+                x, y = int(round(a[0] + v[0] * k)), int(round(a[1] + v[1] * k))
+                if not (0 <= x < w and 0 <= y < h) or not T[y, x]:
+                    break
+                end = np.array([x, y], float)
+                if other[y, x]:                       # (met another step edge)
+                    break
+                k += 1.0
+            if float(np.hypot(*(end - a))) > 2.0:
+                cv2.line(mask.view(np.uint8), tuple(int(round(c)) for c in a), tuple(int(round(c)) for c in end), 1, 1)
+                ext.append([round(float(a[0]), 1), round(float(a[1]), 1), round(float(end[0]), 1), round(float(end[1]), 1)])
+        s["ext"] = ext
+
+
 # 100x score (Avram, 2026-10-27): the largest connected part of the terrace with no step edge, glue / debris, bubble or
 # fold, kept CLEAN_GAP_UM away from each and CLEAN_EDGE_UM from the terrace edge (blurred at 100x)
 CLEAN_GAP_UM = 0.5
@@ -375,8 +543,13 @@ def features(lin, material, oxide_nm, t_nm, substrate=None, expect=None):
     if material == "graphite":                  # (validated on graphite only; on hBN it also finds terrace steps)
         wf, extra["wrinkles"] = wrinkle_lines(lin, T, c8, px_um)   # polylines (original pixels)
         f.update(wf)
+    smask = None
+    if material == "hbn":                       # faint step edges (one layer and up), below the pixel noise
+        smask, extra["step_lines"] = step_edges(rf, T, px_um)
+        f["step_n"] = len(extra["step_lines"])
+        f["step_len_density"] = float(sum(s["len_um"] for s in extra["step_lines"]) / ta * 1000)
     extra["dt"] = dt
-    reg["score100"] = clean_score(T, reg, flab, (bmask, rmask), px_um, extra.get("wrinkles") or ())
+    reg["score100"] = clean_score(T, reg, flab, (bmask, rmask, smask), px_um, extra.get("wrinkles") or ())
     return f, reg, extra
 
 
