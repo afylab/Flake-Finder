@@ -238,7 +238,10 @@ def build_viewer(cc: dict, result, fpolys, tpolys, out_dir, quality=85, verbose=
             if hole.any():
                 a[hole] = look_tile(c)[hole]
         lk.flush()
-        info = {"image": _write_pyramid(can, out / "tiles" / "image", quality, verbose=verbose)}
+        # (2026-11-23b) and the original colours, as before, in tiles/look_orig (index_10x_original_colors.html)
+        info = {"image": _write_pyramid(can, out / "tiles" / "image", quality, verbose=verbose,
+                                        also=(out / "tiles" / "look_orig", look_tile))}
+        info["look_orig"] = dict(info["image"])
         info["look"] = _write_pyramid(lk, out / "tiles" / "look", quality, verbose=verbose)
         info["look"]["colours"] = "100x"
         del lk

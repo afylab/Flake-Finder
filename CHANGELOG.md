@@ -2,6 +2,20 @@
 
 Notable changes to FlakeIdentifier. The scan program's version is shown in its window and logs (`py-YYYY-MM-DD<letter>`).
 
+## py-2026-11-23b
+
+- **The original 10x colours are kept.** The viewer's scan shows the 100x colours by default (`index.html`), and the
+  10x colours as the camera saw them stay in `tiles/look_orig`: `index_10x_original_colors.html` opens the same viewer
+  with them, and the viewer's Image options have an "Original 10x colours" button to switch between the two. The
+  analysis is unchanged: it reads the linear data and `tiles/image`, never these display copies.
+  `python -m flakeid.lens <viewer folder>` keeps an older viewer's layer as `tiles/look_orig` before redoing it.
+- **Better 100x colours.** The distance of a pixel to the 10x colour curve is now measured relatively (log of the
+  reflectance), so bright flakes far along the curve no longer keep their 10x colour (BN_17 F437, 67 nm: orange, now
+  cyan as at 100x). On flakes, each pixel's small departure from the 10x model colour is median-filtered (5 px) before
+  the 100x model colour is applied: dark graphite's red channel (about 7 of 255 at 10x, multiplied about 5 times) no
+  longer turns into red speckle. Median colour difference to the 100x pictures: BN_17 (131 flakes) 172 → 42, GR15'
+  graphite (172 flakes) 51 → 8.
+
 ## py-2026-11-23a
 
 - **The 10x scan in the colours of the 100x pictures.** The viewer's scan (the `tiles/look` layer, its default view) and

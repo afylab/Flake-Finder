@@ -54,7 +54,8 @@ def _write_pyramid(img_bgr: np.ndarray, out: Path, quality: int = 85, threads: i
     """Write an OpenSeadragon-compatible pyramid; level L has size ceil(W / 2^(maxL-L)).
 
     Written one row of tiles at a time (bounded memory for multi-GB mosaics).  also: (out dir, fn) - a second pyramid
-    of the same tiles through fn (8-bit BGR tile -> 8-bit BGR tile; e.g. flakeid.look.look_tile), written alongside."""
+    of the same tiles through fn (8-bit BGR tile -> 8-bit BGR tile; e.g. flakeid.look.look_tile), written alongside;
+    or a list of them (2026-11-23b: tiles/look in the 100x colours and tiles/look_orig in the original ones)."""
     from .progress import Progress
     h, w = img_bgr.shape[:2]
     max_level = int(math.ceil(math.log2(max(w, h))))
@@ -64,6 +65,7 @@ def _write_pyramid(img_bgr: np.ndarray, out: Path, quality: int = 85, threads: i
         total += ((lw_ + TILE - 1) // TILE) * ((lh_ + TILE - 1) // TILE)
         lw_, lh_ = (lw_ + 1) // 2, (lh_ + 1) // 2
     pr = Progress(f"viewer tiles ({out.name})", total, verbose)
+    alsos = [] if not also else [also] if isinstance(also, tuple) and callable(also[-1]) else [a for a in also if a]
     level_img = img_bgr
     n = 0
     with ThreadPoolExecutor(threads) as ex:
@@ -71,16 +73,16 @@ def _write_pyramid(img_bgr: np.ndarray, out: Path, quality: int = 85, threads: i
             lh, lw = level_img.shape[:2]
             d = out / str(L)
             d.mkdir(parents=True, exist_ok=True)
-            if also is not None:
-                d2 = Path(also[0]) / str(L)
-                d2.mkdir(parents=True, exist_ok=True)
+            for ad, _ in alsos:
+                (Path(ad) / str(L)).mkdir(parents=True, exist_ok=True)
             for ty in range(0, lh, TILE):
                 row = [ex.submit(cv2.imwrite, str(d / f"{tx // TILE}_{ty // TILE}.jpg"),
                                  np.ascontiguousarray(level_img[ty:ty + TILE, tx:tx + TILE]), params)
                        for tx in range(0, lw, TILE)]
-                if also is not None:
-                    row += [ex.submit(lambda a, f: cv2.imwrite(f, also[1](a), params),
-                                      np.ascontiguousarray(level_img[ty:ty + TILE, tx:tx + TILE]), str(d2 / f"{tx // TILE}_{ty // TILE}.jpg"))
+                for ad, afn in alsos:
+                    row += [ex.submit(lambda a, f, fn: cv2.imwrite(f, fn(a), params),
+                                      np.ascontiguousarray(level_img[ty:ty + TILE, tx:tx + TILE]),
+                                      str(Path(ad) / str(L) / f"{tx // TILE}_{ty // TILE}.jpg"), afn)
                             for tx in range(0, lw, TILE)]
                 for j in row:
                     j.result()
@@ -171,19 +173,24 @@ def build_viewer(img, result, out_dir, labels_csv: str | None = None, quality: i
     bgr = img.to_uint8(bgr=True)                     # one 8-bit copy (the mosaic can be several GB)
     # tiles/look (the page's default view) when the substrate is balanced to the canvas grey (display_gain: mm datasets)
     # (in the colours of the 100x objective, flakeid.lens, when the material's models exist; from the 8-bit copy here)
+    # (2026-11-23b) and the original colours kept as tiles/look_orig (index_10x_original_colors.html)
     from .look import look_tile
-    fn = look_tile
+    L = None
     try:
         from .lens import lens_for
         L = lens_for(result.material, result.oxide_nm_used or result.oxide_nm, canvas=True)
-        if L is not None:
-            fn = L.look_tile
     except Exception:
         pass
-    lk = (out / "tiles" / "look", fn) if img.display_gain is not None else None
+    lk = None
+    if img.display_gain is not None:
+        lk = [(out / "tiles" / "look", L.look_tile), (out / "tiles" / "look_orig", look_tile)] if L is not None \
+            else [(out / "tiles" / "look", look_tile)]
     info = {"image": _write_pyramid(bgr, out / "tiles" / "image", quality, verbose=verbose, also=lk)}
     if lk:
         info["look"] = dict(info["image"])
+        if L is not None:
+            info["look"]["colours"] = "100x"
+            info["look_orig"] = dict(info["image"])
     rgb8 = bgr[..., ::-1]
     if result._contrast is not None:
         enh = _enhanced(result._contrast, result._substrate_rgb)
@@ -246,10 +253,25 @@ def write_viewer_page(out, info, result, tpolys, fpolys, stage_map=None, verbose
     html = _HTML.replace("__DATA__", json.dumps(data, separators=(",", ":")))
     html = html.replace("__TITLE__", f"{data['name']} flakes")
     (out / "index.html").write_text(html)
+    if info.get("look_orig"):
+        write_original_page(out)
     if verbose:
         n = sum(v["n_tiles"] for v in info.values())
         print(f"  viewer: {out / 'index.html'} ({n} tiles)")
     return out / "index.html"
+
+
+ORIGINAL_PAGE = "index_10x_original_colors.html"
+
+
+def write_original_page(out):
+    """(2026-11-23b) index_10x_original_colors.html: the same viewer with the 10x scan in its original colours
+    (tiles/look_orig) instead of the 100x colours (tiles/look).  A page that opens index.html?colours=original, so the
+    flakes, 100x pictures and outlines added to index.html later are there too."""
+    Path(out, ORIGINAL_PAGE).write_text(
+        '<!doctype html><meta charset="utf-8"><title>original 10x colours</title>'
+        '<script>location.replace("index.html?colours=original"+location.hash)</script>'
+        '<a href="index.html?colours=original">original 10x colours</a>\n', encoding="utf-8")
 
 
 def _write_swap(path, text, tries=6):
@@ -419,7 +441,7 @@ body.imgonly #bEnh,body.imgonly #bOut,body.imgonly #bLab{display:none}
    <div id="legend"></div><div class="lg"><span id="lg0"></span><span>thickness (nm)</span><span id="lg1"></span></div></header>
   <div id="bar2">
    <div class="menu" id="mImg"><button class="tb" id="bImgOpt">Image options</button><div class="pop">
-    <h4>Picture</h4><div class="row"><button id="bImg" class="on">Scan</button><button id="bLin" title="The colours the analysis measures (linear, substrate grey)">Linear</button><button id="bEnh">Enhanced ×3</button></div>
+    <h4>Picture</h4><div class="row"><button id="bImg" class="on">Scan</button><button id="bLin" title="The colours the analysis measures (linear, substrate grey)">Linear</button><button id="bEnh">Enhanced ×3</button><button id="bOrig" hidden title="Scan: the 10x scan in the colours of the 100x pictures; Original 10x colours: as the 10x camera saw it (index_10x_original_colors.html)">Original 10x colours</button></div>
     <h4>Overlay</h4><div class="row"><button id="bOut" class="on">Outlines</button><button id="bLab" class="on">Labels</button></div>
     <h4>Orientation</h4><div class="row"><button id="bRL" title="Rotate 90° counter-clockwise (Shift+R)">↺</button><button id="bRR" title="Rotate 90° clockwise (R)">↻</button>
      <label title="Rotation of the scan image in degrees (clockwise), applied before mirroring"><input id="fRot" type="number" step="1">°</label>
@@ -486,6 +508,10 @@ $('lg0').textContent=D.tmin;$('lg1').textContent=D.tmax;$('fT0').value=D.tmin;$(
 function src(i){return{height:i.height,width:i.width,tileSize:i.tileSize,tileOverlap:0,minLevel:0,maxLevel:i.maxLevel,
  getTileUrl:(L,x,y)=>`tiles/${i.dir}/${L}/${x}_${y}.jpg`}}
 D.info.image.dir='image';if(D.info.enhanced)D.info.enhanced.dir='enhanced';if(D.info.look)D.info.look.dir='look';
+// (2026-11-23b) tiles/look is in the colours of the 100x pictures (info.look.colours "100x"), tiles/look_orig the 10x
+// scan's original colours: index_10x_original_colors.html opens this page with ?colours=original
+const ORIG=!!(D.info.look_orig&&/colours=original/.test(location.search));
+if(D.info.look_orig){D.info.look_orig.dir='look_orig';if(ORIG)D.info.look=D.info.look_orig}
 // the scan as shown: tiles/look (flakeid.look: the reference picture's colours) when written, else tiles/image; the
 // "Linear" button shows tiles/image, the colours the analysis measures
 const BASE=D.info.look||D.info.image;
@@ -619,6 +645,8 @@ $('bEnh').onclick=()=>{if(enhItem)layer('enh')};
 $('bLin').onclick=()=>{if(linItem)layer('lin')};
 if(!D.info.enhanced)$('bEnh').disabled=true;
 if(!D.info.look)$('bLin').hidden=true;
+if(D.info.look_orig){$('bOrig').hidden=false;$('bOrig').classList.toggle('on',ORIG);
+ $('bOrig').onclick=()=>{location.href=(ORIG?'index.html':'index_10x_original_colors.html')+location.hash}}
 $('bOut').onclick=e=>{e.target.classList.toggle('on');$('svg').style.display=e.target.classList.contains('on')?'':'none'};
 $('bLab').onclick=e=>{e.target.classList.toggle('on');labOn=e.target.classList.contains('on');sync()};
 // ---- table

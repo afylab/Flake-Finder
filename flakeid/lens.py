@@ -15,7 +15,8 @@ done per pixel as a gain per channel: out = pixel x R100(t) / R10(t) (R = reflec
 pixel on the model curve becomes the 100x model colour; the substrate (t = 0) keeps gain 1; what is not on the curve
 (dirt, tape, shadows; far from every thickness) keeps its 10x colour (the gain fades to 1 with its distance to the
 curve).  The result is then given flakeid.look's look (the 100x pictures' substrate colour and shoulder), as the 100x
-pictures are.  Only the displayed copies change (the viewer's tiles/look, summary.jpg): the analysis reads tiles/image.
+pictures are.  Only the displayed copies change (the viewer's tiles/look, summary.jpg): the analysis reads the linear
+data and tiles/image.  The original colours stay as tiles/look_orig (index_10x_original_colors.html).
 
 Limits: where two thicknesses have the same 10x colour (hBN ~20 and ~150 nm), the pixel takes the nearer point of the
 curve; the 100x colour of the other branch would differ.
@@ -29,7 +30,8 @@ from .look import CANVAS_SUBSTRATE, look
 Q = 160                         # the look-up table: levels per channel, on the log of the reflectance / substrate
 LOG_LO, LOG_HI = np.log(0.05), np.log(8.0)
 STEP_NM = 0.5
-R_NEAR, R_FAR = 0.10, 0.30      # distance to the 10x curve (contrast units): gain in full below, none above
+R_NEAR, R_FAR = 0.15, 0.40      # distance to the 10x curve (log of reflectance / substrate, i.e. relative: a bright flake
+                                # 10 % off the model is as near as a faint one 10 % off): gain in full below, none above
 MEDIAN_PX = 5                   # the thickness map's median filter (camera noise; keeps flake edges)
 MEDIAN_PX_CANVAS = 9            # ... on the 8-bit canvas: where R and G are clipped two thicknesses read alike, and the
                                 # pixels of one terrace flip between them
@@ -67,18 +69,28 @@ class Lens:
         rc = r10 if clip is None else np.minimum(r10, float(clip))           # the 10x curve as the input records it
         self.gain = (r100 / np.maximum(rc, 1e-6)).astype(np.float32)         # (on the curve: exactly the 100x colour)
         self.gain[0] = 1.0
-        tree = cKDTree(rc ** (1.0 / g10) - 1.0)
+        self.rc = np.maximum(rc, 1e-6).astype(np.float32)
+        self.r100 = self.r100.astype(np.float32)
+        self.r100[0] = self.rc[0]                                            # (the substrate stays as it is)
+        tree = cKDTree(np.log(np.maximum(rc, 1e-4)))
         v = np.exp(LOG_LO + (np.arange(Q) + 0.5) / Q * (LOG_HI - LOG_LO))
         if clip is not None:
             v = np.minimum(v, float(clip))
         grid = np.stack(np.meshgrid(v, v, v, indexing="ij"), -1).reshape(-1, 3)
-        dist, idx = tree.query(grid ** (1.0 / g10) - 1.0)
+        dist, idx = tree.query(np.log(grid))
         self.t_lut = idx.astype(np.uint16).reshape(Q, Q, Q)
         self.w_lut = np.round(255 * np.clip((R_FAR - dist) / (R_FAR - R_NEAR), 0.0, 1.0)).astype(np.uint8).reshape(Q, Q, Q)
 
     def gains(self, ratio):
         """(H, W, 3) reflectance / substrate -> (H, W, 3) gain per channel (the 100x / 10x model ratio at each pixel's
         thickness, faded to 1 off the curve), the thickness map median-filtered."""
+        i, w = self.thickness_index(ratio)
+        wf = (w.astype(np.float32) / 255.0)[..., None]
+        return 1.0 + wf * (self.gain[i] - 1.0)
+
+    def thickness_index(self, ratio):
+        """(H, W, 3) reflectance / substrate -> (index into self.t, weight 0-255: 255 on the 10x curve, 0 far off it),
+        the index map median-filtered."""
         import cv2
         r = np.asarray(ratio, np.float32)
         li = ((np.log(np.maximum(r, 1e-4)) - LOG_LO) * (Q / (LOG_HI - LOG_LO))).astype(np.int32)
@@ -92,13 +104,21 @@ class Lens:
                 from scipy.ndimage import median_filter
                 i = median_filter(i, size=k, mode="nearest")
             w = cv2.medianBlur(np.ascontiguousarray(w), k)
-        wf = (w.astype(np.float32) / 255.0)[..., None]
-        return 1.0 + wf * (self.gain[i] - 1.0)
+        return i, w
 
     def look_ratio(self, ratio):
-        """(H, W, 3) RGB reflectance / substrate (10x) -> 8-bit RGB as the 100x pictures show it (flakeid.look)."""
+        """(H, W, 3) RGB reflectance / substrate (10x) -> 8-bit RGB as the 100x pictures show it (flakeid.look).
+        On the curve the pixel becomes the 100x model colour times its own small departure from the 10x model colour,
+        that departure median-filtered: a dark channel (graphite's red at 10x: ~7 of 255) multiplied by a large gain
+        (x5) would otherwise turn its 8-bit steps into coloured speckle."""
         r = np.asarray(ratio, np.float32)
-        return look(r * self.gains(r), (1.0, 1.0, 1.0))
+        i, w = self.thickness_index(r)
+        res = r / self.rc[i]
+        if min(res.shape[:2]) >= 5:
+            import cv2
+            res = cv2.medianBlur(np.ascontiguousarray(res, np.float32), 5)
+        wf = (w.astype(np.float32) / 255.0)[..., None]
+        return look(wf * (self.r100[i] * res) + (1.0 - wf) * r, (1.0, 1.0, 1.0))
 
     def look_tile(self, img_bgr, canvas_sub=CANVAS_SUBSTRATE):
         """A viewer tile (8-bit BGR canvas, substrate at canvas_sub) -> the same tile in the 100x colours (BGR)."""
@@ -123,14 +143,21 @@ def lens_for(material, oxide10_nm, oxide100_nm=None, canvas=False):
 
 def redo_viewer(vdir, oxide100_nm=None, log=print):
     """An existing viewer folder's tiles/look made again from its tiles/image in the 100x colours (the 8-bit canvas
-    path: bright flakes are clipped there, so scans made from now on, rendered from the linear data, look better)."""
+    path: bright flakes are clipped there, so scans made from now on, rendered from the linear data, look better).
+    Its look as it was (the original 10x colours) is kept as tiles/look_orig, shown by index_10x_original_colors.html
+    and the page's Original 10x colours button."""
     import json
     import re
+    import shutil
     from pathlib import Path
     import cv2
+    from .look import look_tile
+    from .zoomview import upgrade_page, write_original_page, _write_swap
     vdir = Path(vdir)
-    html = (vdir / "index.html").read_text(encoding="utf-8", errors="replace")
-    D = json.loads(re.search(r"const D=(\{.*?\});\n", html, re.S).group(1))
+    page = vdir / "index.html"
+    html = page.read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"const D=(\{.*?\});\n", html, re.S)
+    D = json.loads(m.group(1))
     if D.get("image_only") or not D.get("oxide"):
         log(f"{vdir}: no oxide (10x image only): left as it is")
         return 0
@@ -138,16 +165,35 @@ def redo_viewer(vdir, oxide100_nm=None, log=print):
     if L is None:
         log(f"{vdir}: no 100x model for {D.get('material')}")
         return 0
+    info = D.setdefault("info", {})
+    look_dir, orig_dir = vdir / "tiles" / "look", vdir / "tiles" / "look_orig"
+    if not orig_dir.is_dir():
+        if look_dir.is_dir() and (info.get("look") or {}).get("colours") != "100x":
+            shutil.move(str(look_dir), str(orig_dir))          # (its look as made by the scan: the original colours)
+        else:                                                  # (no look layer, or already the 100x one: from tiles/image)
+            for f in sorted((vdir / "tiles" / "image").glob("*/*.jpg")):
+                img = cv2.imread(str(f), cv2.IMREAD_COLOR)
+                if img is not None:
+                    (orig_dir / f.parent.name).mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(str(orig_dir / f.parent.name / f.name), look_tile(img), [cv2.IMWRITE_JPEG_QUALITY, 85])
     n = 0
     for f in sorted((vdir / "tiles" / "image").glob("*/*.jpg")):
-        dst = vdir / "tiles" / "look" / f.parent.name / f.name
+        dst = look_dir / f.parent.name / f.name
         dst.parent.mkdir(parents=True, exist_ok=True)
         img = cv2.imread(str(f), cv2.IMREAD_COLOR)
         if img is None:
             continue
         cv2.imwrite(str(dst), L.look_tile(img), [cv2.IMWRITE_JPEG_QUALITY, 85])
         n += 1
-    log(f"{vdir}: {n} tiles in the 100x colours ({L.material}, 10x oxide {L.oxide10:g} nm, 100x {L.oxide100:g} nm)")
+    info["look"] = dict(info.get("look") or info["image"], colours="100x")
+    info["look_orig"] = {k: v for k, v in info["look"].items() if k not in ("colours", "dir")}
+    info["look"].pop("dir", None)
+    new = html[:m.start(1)] + json.dumps(D, separators=(",", ":")) + html[m.end(1):]
+    _write_swap(page, new)
+    upgrade_page(page)                                          # (the page with the Original 10x colours button)
+    write_original_page(vdir)
+    log(f"{vdir}: {n} tiles in the 100x colours ({L.material}, 10x oxide {L.oxide10:g} nm, 100x {L.oxide100:g} nm); "
+        f"the original colours in tiles/look_orig")
     return n
 
 
