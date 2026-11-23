@@ -335,11 +335,13 @@ models: the run's fitted oxide, +9 nm at 100x for hBN, as the 100x thickness rea
 (dirt, tape, shadows) keeps its colour. It is made from the linear data block by block (the 8-bit 10x picture clips
 bright flakes); `python -m flakeid.lens <viewer folder>` redoes an older viewer's layer from its 8-bit tiles (on a
 copy: bright thick flakes can come out patchy there). Where two thicknesses have the same 10x colour (hBN ~20 and
-~150 nm) the nearer one is taken.
+~150 nm) the nearer one is taken. The original 10x colours are kept (from py-2026-11-23b) in `tiles/look_orig`:
+`index_10x_original_colors.html` opens the viewer with them, and *Image options › Original 10x colours* switches
+between the two. Both are only for looking at: the analysis reads the linear data and `tiles/image`.
 
 **The page**: on the right, the name, the number of flakes, the thickness colours, then one row of
 buttons, the table and the selected flake's details.
-- **Image options** (opens when the mouse is on it): the map's picture (*Scan*, *Linear*, *Enhanced ×3*), *Outlines*
+- **Image options** (opens when the mouse is on it): the map's picture (*Scan*, *Linear*, *Enhanced ×3*, *Original 10x colours*), *Outlines*
   and *Labels*, the orientation (rotate, mirror) and the coordinates (*Set origin*, *Align X*, *Measure*, *Clear*), and
   the keys.
 - **Filter** (click): *Only flakes with 100x images*, the thickness (flakes with a terrace in the range), the flake area,
