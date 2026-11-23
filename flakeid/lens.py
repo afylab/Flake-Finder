@@ -29,7 +29,8 @@ from .look import CANVAS_SUBSTRATE, look
 Q = 160                         # the look-up table: levels per channel, on the log of the reflectance / substrate
 LOG_LO, LOG_HI = np.log(0.05), np.log(8.0)
 STEP_NM = 0.5
-R_NEAR, R_FAR = 0.10, 0.30      # distance to the 10x curve (contrast units): gain in full below, none above
+R_NEAR, R_FAR = 0.15, 0.40      # distance to the 10x curve (log of reflectance / substrate, i.e. relative: a bright flake
+                                # 10 % off the model is as near as a faint one 10 % off): gain in full below, none above
 MEDIAN_PX = 5                   # the thickness map's median filter (camera noise; keeps flake edges)
 MEDIAN_PX_CANVAS = 9            # ... on the 8-bit canvas: where R and G are clipped two thicknesses read alike, and the
                                 # pixels of one terrace flip between them
@@ -67,12 +68,12 @@ class Lens:
         rc = r10 if clip is None else np.minimum(r10, float(clip))           # the 10x curve as the input records it
         self.gain = (r100 / np.maximum(rc, 1e-6)).astype(np.float32)         # (on the curve: exactly the 100x colour)
         self.gain[0] = 1.0
-        tree = cKDTree(rc ** (1.0 / g10) - 1.0)
+        tree = cKDTree(np.log(np.maximum(rc, 1e-4)))
         v = np.exp(LOG_LO + (np.arange(Q) + 0.5) / Q * (LOG_HI - LOG_LO))
         if clip is not None:
             v = np.minimum(v, float(clip))
         grid = np.stack(np.meshgrid(v, v, v, indexing="ij"), -1).reshape(-1, 3)
-        dist, idx = tree.query(grid ** (1.0 / g10) - 1.0)
+        dist, idx = tree.query(np.log(grid))
         self.t_lut = idx.astype(np.uint16).reshape(Q, Q, Q)
         self.w_lut = np.round(255 * np.clip((R_FAR - dist) / (R_FAR - R_NEAR), 0.0, 1.0)).astype(np.uint8).reshape(Q, Q, Q)
 
