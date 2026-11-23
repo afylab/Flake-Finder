@@ -2,6 +2,18 @@
 
 Notable changes to FlakeIdentifier. The scan program's version is shown in its window and logs (`py-YYYY-MM-DD<letter>`).
 
+## py-2026-11-23a
+
+- **The 10x scan in the colours of the 100x pictures.** The viewer's scan (the `tiles/look` layer, its default view) and
+  the summary picture now show every flake in the colour it has at 100x. The objectives see different colours: the
+  100x (NA 0.9) averages the thin-film interference over wide angles, the 10x (NA 0.3) sees it nearly straight on.
+  Before, only the substrate was matched, and the flakes kept their 10x colours (on 285 nm oxide, hBN that is
+  cyan-green at 100x was orange at 10x). Each pixel goes to its thickness with the 10x thin-film model, then to the
+  100x model's colour at that thickness. The 10x scan is made from the linear data, block by block, while the scan is
+  analysed. On 131 BN 100x pictures (BN_17) the median colour difference on the flakes went from 172 to 54 (8-bit RGB),
+  and it was smaller for 128 of them. The analysis, the thickness and the `tiles/image` layer are unchanged.
+  `python -m flakeid.lens <viewer folder>` redoes an older viewer's layer.
+
 ## py-2026-11-21a
 
 - **Faint hBN steps are found.** One- and two-layer steps (about a 1 % colour change on thick hBN) are as large as the

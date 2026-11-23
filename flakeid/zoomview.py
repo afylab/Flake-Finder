@@ -170,8 +170,17 @@ def build_viewer(img, result, out_dir, labels_csv: str | None = None, quality: i
     (out / "tiles").mkdir(parents=True, exist_ok=True)
     bgr = img.to_uint8(bgr=True)                     # one 8-bit copy (the mosaic can be several GB)
     # tiles/look (the page's default view) when the substrate is balanced to the canvas grey (display_gain: mm datasets)
+    # (in the colours of the 100x objective, flakeid.lens, when the material's models exist; from the 8-bit copy here)
     from .look import look_tile
-    lk = (out / "tiles" / "look", look_tile) if img.display_gain is not None else None
+    fn = look_tile
+    try:
+        from .lens import lens_for
+        L = lens_for(result.material, result.oxide_nm_used or result.oxide_nm, canvas=True)
+        if L is not None:
+            fn = L.look_tile
+    except Exception:
+        pass
+    lk = (out / "tiles" / "look", fn) if img.display_gain is not None else None
     info = {"image": _write_pyramid(bgr, out / "tiles" / "image", quality, verbose=verbose, also=lk)}
     if lk:
         info["look"] = dict(info["image"])

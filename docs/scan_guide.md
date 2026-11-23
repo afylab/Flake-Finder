@@ -325,6 +325,18 @@ changing their hue instead of clipping. These are separate copies: `<picture>_lo
 thumbnails) show them. The analysis, the thickness and every measurement read the original, linear pictures, which
 are unchanged: the viewer's **Linear** button (map) and *linear* view (100x) show those.
 
+**The 10x scan in the 100x colours** (`flakeid.lens`, from py-2026-11-23a): a flake does not have the same colour
+under the two objectives. Its colour is thin-film interference in flake / SiO2 / Si, and the 100x (NA 0.9) takes in
+light up to ~64° off the axis, where the path through the films is shorter, while the 10x (NA 0.3) sees it nearly
+straight on: on 285 nm oxide a 40 nm hBN flake is green-yellow at 10x and blue-cyan at 100x. The colours are tied only
+through the thickness, so the viewer's `tiles/look` layer (and the summary picture) take each 10x pixel to its
+thickness with the 10x thin-film model and give it the 100x model's colour at that thickness (the analysis's own
+models: the run's fitted oxide, +9 nm at 100x for hBN, as the 100x thickness readings). What is not a flake colour
+(dirt, tape, shadows) keeps its colour. It is made from the linear data block by block (the 8-bit 10x picture clips
+bright flakes); `python -m flakeid.lens <viewer folder>` redoes an older viewer's layer from its 8-bit tiles (on a
+copy: bright thick flakes can come out patchy there). Where two thicknesses have the same 10x colour (hBN ~20 and
+~150 nm) the nearer one is taken.
+
 **The page**: on the right, the name, the number of flakes, the thickness colours, then one row of
 buttons, the table and the selected flake's details.
 - **Image options** (opens when the mouse is on it): the map's picture (*Scan*, *Linear*, *Enhanced ×3*), *Outlines*

@@ -53,10 +53,12 @@ def setup(out_dir: Path, name: str, plan: dict, M, frame_wh) -> dict:
     W, H = int(math.ceil(q[:, 0].max() - O[0] + wh[0])), int(math.ceil(q[:, 1].max() - O[1] + wh[1]))
     out_dir = Path(out_dir)
     path, epath = out_dir / f"{name}_canvas.u8", out_dir / f"{name}_canvas_enh.u8"
+    lpath = out_dir / f"{name}_canvas_look.u8"                 # the 10x in the 100x colours (flakeid.lens), for tiles/look
     # (str, not Path: numpy 1.24 resolves a Path while the new file is still open, which Windows refuses under
     # Python 3.8 with "used by another process" (the microscope PC, 2026-10-03))
     np.memmap(str(path), np.uint8, "w+", shape=(H, W, 3)).flush()          # file of zeros: no data = black
     np.memmap(str(epath), np.uint8, "w+", shape=((H + 1) // 2, (W + 1) // 2, 3)).flush()
+    np.memmap(str(lpath), np.uint8, "w+", shape=(H, W, 3)).flush()
     cells = {}
     gc = {g: (Minv @ (np.array(s) - P0)) - O + wh / 2 for g, s in plan.items()}   # planned centres (canvas px)
     for g, c in gc.items():
@@ -73,7 +75,7 @@ def setup(out_dir: Path, name: str, plan: dict, M, frame_wh) -> dict:
             else:
                 hi[ax] = min(hi[ax], mid)
         cells[f"Pos-{g[0]:03d}_{g[1]:03d}"] = (int(round(lo[0])), int(round(lo[1])), int(round(hi[0])), int(round(hi[1])))
-    return dict(path=str(path), epath=str(epath), shape=(H, W), O=O.tolist(), P0=P0.tolist(), Minv=Minv.tolist(),
+    return dict(path=str(path), epath=str(epath), lpath=str(lpath), shape=(H, W), O=O.tolist(), P0=P0.tolist(), Minv=Minv.tolist(),
                 M=M.tolist(), wh=list(frame_wh), cells=cells,
                 stage_map=dict(M=M.tolist(), P=P.tolist(), q=(q - O).tolist(), wh=list(frame_wh)))
 
@@ -94,9 +96,20 @@ def _maps(cc):
     return _MAPS[cc["path"]], _MAPS[cc["epath"]]
 
 
+def _look_map(cc):
+    """The look canvas (main process), or None (a canvas set up before 2026-11-23 has none)."""
+    lp = cc.get("lpath")
+    if not lp:
+        return None
+    if lp not in _MAPS:
+        H, W = cc["shape"]
+        _MAPS[lp] = np.memmap(lp, np.uint8, "r+", shape=(H, W, 3))
+    return _MAPS[lp]
+
+
 def close(cc):
-    for k in ("path", "epath"):
-        m = _MAPS.pop(cc[k], None)
+    for k in ("path", "epath", "lpath"):
+        m = _MAPS.pop(cc.get(k), None)
         if m is not None:
             try:
                 m.flush()
@@ -109,23 +122,38 @@ def paste(cc: dict, patches):
     """Main process: the cells rendered by render_block into the canvas."""
     can, enh = _maps(cc)
     for kind, y0, x0, a in patches:
-        dst = can if kind == "c" else enh
+        if kind == "l":                                 # (the 100x colours: flakeid.lens)
+            dst = _look_map(cc)
+            if dst is None:
+                continue
+            cc["look_lens"] = True
+        else:
+            dst = can if kind == "c" else enh
         dst[y0:y0 + a.shape[0], x0:x0 + a.shape[1]] = a
 
 
 def flush(cc: dict):
-    for k in ("path", "epath"):
-        m = _MAPS.get(cc[k])
+    for k in ("path", "epath", "lpath"):
+        m = _MAPS.get(cc.get(k))
         if m is not None:
             m.flush()
 
 
-def render_block(cc: dict, cmap, labels_core, rgb16, contrast, ws: float, substrate, block_origin_global=None):
-    """The core tiles' cells of a block as canvas patches [(kind 'c' | 'e', y0, x0, uint8 array)] for paste.
+def render_block(cc: dict, cmap, labels_core, rgb16, contrast, ws: float, substrate, block_origin_global=None, lens=None):
+    """The core tiles' cells of a block as canvas patches [(kind 'c' | 'e' | 'l', y0, x0, uint8 array)] for paste.
 
     cmap: the block crop's StageMap (registered tile positions in crop pixels); rgb16: the crop (linear, mosaic
     units); contrast: the crop's contrast map at work scale ws (or None); substrate: RGB substrate level (mosaic
-    units) for the display gain; block_origin_global: unused (cells are placed tile by tile)."""
+    units) for the display gain; block_origin_global: unused (cells are placed tile by tile); lens: {material, oxide_nm}
+    (the scan's fitted 10x oxide) -> also the cells in the colours of the 100x objective (flakeid.lens, 'l'), made from
+    the linear data (the 8-bit canvas clips bright flakes)."""
+    L = None
+    if lens and cc.get("lpath"):
+        try:
+            from .lens import lens_for
+            L = lens_for(lens["material"], lens["oxide_nm"])
+        except Exception:
+            L = None
     H, W = cc["shape"]
     EH, EW = (H + 1) // 2, (W + 1) // 2
     out = []
@@ -148,6 +176,11 @@ def render_block(cc: dict, cmap, labels_core, rgb16, contrast, ws: float, substr
             continue
         blk = rgb16[y0 + d[1]:y1 + d[1], x0 + d[0]:x1 + d[0], ::-1].astype(np.float32)
         out.append(("c", int(y0), int(x0), np.clip(blk * g8 + 0.5, 0, 255).astype(np.uint8)))
+        if L is not None:
+            try:
+                out.append(("l", int(y0), int(x0), np.ascontiguousarray(L.look_ratio(blk[..., ::-1] / sub)[..., ::-1])))
+            except Exception:
+                L = None
         if contrast is not None:
             ex0, ey0, ex1, ey1 = x0 // 2, y0 // 2, (x1 + 1) // 2, (y1 + 1) // 2
             cx0, cy0 = int((ex0 * 2 + d[0]) * ws), int((ey0 * 2 + d[1]) * ws)
@@ -167,10 +200,14 @@ def write_block(cc: dict, cmap, labels_core, rgb16, contrast, ws: float, substra
 def summary(cc: dict, flakes, fpolys, tpolys, terr_t, path, tmin, tmax, width=2400):
     """Overview JPEG: the canvas (every k-th pixel) dimmed, flakes outlined in their thickness colour and numbered."""
     H, W = cc["shape"]
-    can = np.memmap(cc["path"], np.uint8, "r", shape=(H, W, 3))
     k = max(1, int(math.ceil(W / width)))
-    from .look import look_tile                         # (with the look of the pictures: flakeid.look)
-    img = (look_tile(np.asarray(can[::k, ::k])).astype(np.float32) * 0.55).astype(np.uint8)
+    if cc.get("look_lens"):                             # (the 100x colours, as tiles/look)
+        img = (np.asarray(np.memmap(cc["lpath"], np.uint8, "r", shape=(H, W, 3))[::k, ::k]).astype(np.float32) * 0.55).astype(np.uint8)
+    else:
+        can = np.memmap(cc["path"], np.uint8, "r", shape=(H, W, 3))
+        from .look import look_tile                     # (with the look of the pictures: flakeid.look)
+        img = (look_tile(np.asarray(can[::k, ::k])).astype(np.float32) * 0.55).astype(np.uint8)
+        del can
     cmap = cv2.applyColorMap(np.arange(256, dtype=np.uint8).reshape(-1, 1), cv2.COLORMAP_MAGMA).reshape(-1, 3)
     for f in flakes:
         t = f.best_thickness_nm
@@ -180,7 +217,6 @@ def summary(cc: dict, flakes, fpolys, tpolys, terr_t, path, tmin, tmax, width=24
             cv2.polylines(img, [q], True, col, 1, cv2.LINE_AA)
         cv2.putText(img, f"{f.flake_id}", (int(f.x_px / k) + 4, int(f.y_px / k) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, col, 1, cv2.LINE_AA)
     cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    del can
 
 
 def build_viewer(cc: dict, result, fpolys, tpolys, out_dir, quality=85, verbose=False):
@@ -191,9 +227,26 @@ def build_viewer(cc: dict, result, fpolys, tpolys, out_dir, quality=85, verbose=
     (out / "tiles").mkdir(parents=True, exist_ok=True)
     H, W = cc["shape"]
     from .look import look_tile
-    info = {"image": _write_pyramid(np.memmap(cc["path"], np.uint8, "r", shape=(H, W, 3)), out / "tiles" / "image", quality, verbose=verbose,
-                                    also=(out / "tiles" / "look", look_tile))}     # (tiles/look: the page's default view)
-    info["look"] = dict(info["image"])
+    can = np.memmap(cc["path"], np.uint8, "r", shape=(H, W, 3))
+    if cc.get("look_lens"):
+        # tiles/look (the page's default view): the 10x in the 100x colours, rendered block by block from the linear
+        # data (flakeid.lens); a cell no block rendered that way (black) gets the substrate-balanced look
+        lk = np.memmap(cc["lpath"], np.uint8, "r+", shape=(H, W, 3))
+        for y in range(0, H, 1024):
+            a, c = lk[y:y + 1024], np.asarray(can[y:y + 1024])
+            hole = (a.max(axis=2) == 0) & (c.max(axis=2) > 0)
+            if hole.any():
+                a[hole] = look_tile(c)[hole]
+        lk.flush()
+        info = {"image": _write_pyramid(can, out / "tiles" / "image", quality, verbose=verbose)}
+        info["look"] = _write_pyramid(lk, out / "tiles" / "look", quality, verbose=verbose)
+        info["look"]["colours"] = "100x"
+        del lk
+    else:
+        info = {"image": _write_pyramid(can, out / "tiles" / "image", quality, verbose=verbose,
+                                        also=(out / "tiles" / "look", look_tile))}     # (tiles/look: the page's default view)
+        info["look"] = dict(info["image"])
+    del can
     if not result.params.get("image_only"):         # (the 10x image only: no contrast layer was made)
         info["enhanced"] = _write_pyramid(np.memmap(cc["epath"], np.uint8, "r", shape=((H + 1) // 2, (W + 1) // 2, 3)),
                                           out / "tiles" / "enhanced", quality, verbose=verbose)
@@ -205,7 +258,9 @@ def build_viewer(cc: dict, result, fpolys, tpolys, out_dir, quality=85, verbose=
 
 def cleanup(cc: dict):
     close(cc)
-    for k in ("path", "epath"):
+    for k in ("path", "epath", "lpath"):
+        if not cc.get(k):
+            continue
         try:
             Path(cc[k]).unlink()
         except OSError:

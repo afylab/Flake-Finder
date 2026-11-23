@@ -265,7 +265,7 @@ def analyse_block(tiles: list, core: list, cfg: dict) -> dict:
                 v = v[v.min(1) > 0]
                 sub = np.median(v, 0) if len(v) else np.full(3, 20000.0)
             out["canvas"] = livecanvas.render_block(cc, cmap, core, rgb, res_._contrast if res_ is not None else None,
-                                                    res_._scale if res_ is not None else 0.5, sub, None)
+                                                    res_._scale if res_ is not None else 0.5, sub, None, cfg.get("lens"))
         except Exception as exc:
             out["canvas_error"] = f"{type(exc).__name__}: {exc}"
     if cfg.get("image_only"):
@@ -638,7 +638,11 @@ class LiveScan:
                     material=self.material, oxide_nm=self.oxide_frozen or self.oxide_nm,
                     refine=self.refine and self.oxide_frozen is None, options=self.options,
                     substrate=self.substrate, calibrated=self.oxide_frozen is not None, canvas=self.cc,
-                    image_only=self.image_only)
+                    image_only=self.image_only,
+                    # the viewer's tiles/look in the colours of the 100x objective (flakeid.lens): once the oxide is fixed
+                    # (or from the start with --no-refine-oxide: the oxide as entered)
+                    lens=(dict(material=self.material, oxide_nm=self.oxide_frozen or self.oxide_nm)
+                          if (self.oxide_frozen is not None or not self.refine) and not self.image_only else None))
 
     def _collect(self, b, r, pending_blocks):
         patches = r.pop("canvas", None)
