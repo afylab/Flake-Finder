@@ -31,7 +31,7 @@ import numpy as np
 from .settings import Settings, dump
 from flakeid.fieldmosaic import field_size_um, fmt_matrix, format_poly, parse_poly, plan_fields
 
-VERSION = "py-2026-11-23b"
+VERSION = "py-2026-11-24a"
 NAN = float("nan")
 MANUAL_RETAKE = "Manual focus (retakes)"       # the 100x window's button: a retake focused by hand
 IDX100_HEADER = ("order,label,stage_x_um,stage_y_um,z_um,z_drive,z10_um,offset_um,focus,af_ratio,saturated_frac,file,shift_files,"
@@ -2015,12 +2015,18 @@ class Scanner:
 
     def sweep(self, zs, roi):
         ms = np.full(len(zs), -1.0)
+        br = np.full(len(zs), np.nan)                   # (each height's mean brightness: _autofocus's first guess)
+        self._af_bright = br
         if self.set_z(zs[0] - self.s.af_backlash_um):
             self.check_z_reach("autofocus sweep")
         need, out = self.af_min_substrate(), []
         for i, z in enumerate(zs):
             if self.set_z(z):
+                self._af_frame = None
                 ms[i] = self.sharpness(roi)
+                fa = getattr(self, "_af_frame", None)
+                if fa is not None:
+                    br[i] = float(np.asarray(fa)[::4, ::4].mean())
                 if need > 0 and getattr(self, "_af_frame", None) is not None:
                     fr = self.substrate_fraction(self.blocks(self._af_frame))
                     if fr < need:                        # (not the chip: the holder, tape, glue in focus)
@@ -2039,6 +2045,29 @@ class Scanner:
             # limit, the same picture; the best focus within reach is at the limit: focus_limit_check)
             self._af_limit = (float(zs[bi]), float(L["z"]))
         return bi, ms
+
+    def bright_guess(self, zs, ms, p):
+        """(2026-11-24) The first guess of a wide sweep: the height where the picture is brightest (af_bright_first), a
+        parabola through it and its neighbours; None when not used (off, a narrow sweep, brightness not measured or
+        flat, its peak at an end of the sweep).  Heights left out of the sharpness (ms 0: not the chip) are left out."""
+        s = self.s
+        br = getattr(self, "_af_bright", None)
+        if (not getattr(s, "af_bright_first", False) or p[0] < getattr(s, "af_bright_min_range_um", 10.0) or br is None
+                or len(br) != len(zs) or len(zs) < 3):
+            return None
+        b = np.where(np.asarray(ms) > 0, br, np.nan)
+        ok = np.isfinite(b)
+        if ok.sum() < 3:
+            return None
+        i = int(np.nanargmax(b))
+        if i == 0 or i == len(zs) - 1 or not (ok[i - 1] and ok[i + 1]):
+            return None
+        if b[i] < (1.0 + s.af_bright_min_rise) * float(np.nanmedian(b)):
+            return None
+        y0, y1, y2 = b[i - 1], b[i], b[i + 1]
+        den = y0 - 2 * y1 + y2
+        step = float(zs[1] - zs[0])
+        return float(zs[i] + (0.5 * step * (y0 - y2) / den if den < 0 else 0.0))
 
     def despike(self, zs, ms, roi):
         for i in range(len(zs)):
@@ -2128,7 +2157,13 @@ class Scanner:
             if bi == n - 1 and ext < s_ext:
                 lo = hi - p[1]; hi = lo + 2 * p[0]; continue
             break
-        if ratio < s.af_min_ratio:
+        bz = self.bright_guess(zs, ms, p) if fine is True else None
+        sharp_z, sharp_m = best, (float(ms[int(np.argmin(np.abs(zs - best)))]) if len(ms) else 0.0)
+        if bz is not None:
+            if s.verbose:
+                self.say(f"      autofocus: first guess Z {f3(bz)} (brightest), sharpest Z {f3(best)} (peak/median {f3(ratio)})")
+            best = bz
+        if ratio < s.af_min_ratio and bz is None:
             if s.verbose:
                 self.say(f"      autofocus: no focus signal (peak/median {f3(ratio)})")
             self.set_z(zc)
@@ -2156,6 +2191,21 @@ class Scanner:
             fi, mf = self.sweep(zf, p[4])
             if s.verbose:
                 self.say(f"      fine sweep re-centred on Z {f3(zc2)}")
+        if bz is not None:
+            vf = mf[mf >= 0]
+            fr = float(mf[fi]) / max(float(np.sort(vf)[len(vf) // 2]), 1e-9) if len(vf) >= 3 else 0.0
+            if ratio >= s.af_min_ratio and mf[fi] < s.af_bright_keep * sharp_m:
+                # (the brightest height led away from the sharp focus: the coarse sweep's sharpest height, as before)
+                self.say(f"      autofocus: brightest Z {f3(bz)} less sharp than Z {f3(sharp_z)}: the sharpest used")
+                zf = sharp_z - p[2] + np.arange(nf) * p[3]
+                fi, mf = self.sweep(zf, p[4])
+            elif ratio < s.af_min_ratio and fr < s.af_min_ratio:
+                if s.verbose:
+                    self.say(f"      autofocus: no focus signal (peak/median {f3(ratio)}; {f3(fr)} around the brightest Z {f3(bz)})")
+                self.set_z(zc)
+                return (zc, ratio, False)
+            elif ratio < s.af_min_ratio:
+                ratio = fr                               # (no edges in the coarse sweep: focus found at the brightest)
         z = float(zf[fi])
         pos = mf > 0
         if pos.sum() >= 3:

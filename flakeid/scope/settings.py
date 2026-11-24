@@ -171,6 +171,15 @@ class Settings:
     pause_refocus_warn_um: float = 10.0
     af_extend: int = 2
     af_min_ratio: float = 1.10
+    # (2026-11-24) the first guess of a wide autofocus sweep (half range >= af_bright_min_range_um: the 10x focus points,
+    # the first 100x flakes, the long search) is the height where the picture is brightest (more light reaches the camera
+    # in focus); the fine sweep is made there.  Used when the brightness peak is inside the sweep and at least
+    # af_bright_min_rise above the sweep's median brightness; when the fine sweep there is less sharp than
+    # af_bright_keep x the coarse sweep's sharpest height, that height is used instead (as before).  False: as before
+    af_bright_first: bool = True
+    af_bright_min_range_um: float = 10.0
+    af_bright_min_rise: float = 0.005
+    af_bright_keep: float = 0.9
     af_backlash_um: float = 5.0
     spike_factor: float = 3.0
     # wait after every Z move before the next frame (the drive reports "done" when the motor stops; 20 ms let the
