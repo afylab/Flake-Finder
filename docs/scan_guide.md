@@ -137,6 +137,8 @@ and the green dot where it started.
 The main window shows what it is doing; **Stop the scan** stops within a second or so at any stage (it is checked
 on every camera frame and while waiting), also in the middle of an autofocus.
 
+**How the autofocus works.** It moves the focus drive through a range of heights, takes a picture at each and scores how sharp its edges are (brightness gradient over the middle of the picture, divided by its brightness); the sharpest height is the focus, refined by a finer sweep around it. In the wide sweeps (the 10x focus points, the first 100x flakes, the ±80 µm search) the **first guess** for the fine sweep is the height where the picture is **brightest** (more light reaches the camera in focus): the fine sweep is made there, so a focus is also found when the coarse steps missed the sharp edges. If the fine sweep there is clearly less sharp than the coarse sweep's sharpest height, that height is used and the log says `brightest Z ... less sharp ...: the sharpest used`. Settings `af_bright_first` (off: as before py-2026-11-24a), `af_bright_min_range_um`, `af_bright_min_rise`, `af_bright_keep`.
+
 **Focus drive at its lower limit.** When an autofocus's best focus is at the focus drive's lower limit (the sweep's
 sharpest place is where the drive cannot go lower, or the best focus it found is below where the drive stops), every
 picture from there would be out of focus: the scan **stops** and sends a message (Slack / email) saying so. Bring the

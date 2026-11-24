@@ -2,6 +2,16 @@
 
 Notable changes to FlakeIdentifier. The scan program's version is shown in its window and logs (`py-YYYY-MM-DD<letter>`).
 
+## py-2026-11-24a
+
+- **Autofocus: the brightest height is the first guess.** More light reaches the camera in focus. In the wide autofocus
+  sweeps (the 10x focus points, the first 100x flakes, the ±80 µm search) each picture's brightness is measured with its
+  sharpness, and the fine sweep is made around the brightest height instead of the sharpest one. A focus is now also
+  found when the coarse 5 µm steps missed the sharp edges (before: "no focus signal"). Safeguards: brightness that hardly
+  changes (under 0.5 %) or peaks at an end of the sweep is not used; a fine sweep there clearly less sharp than the coarse
+  sweep's sharpest height falls back to that height (logged). The 100x autofocus after the first flakes (±2.4 µm around a
+  prediction) is unchanged. `af_bright_first` False: as before.
+
 ## py-2026-11-23b
 
 - **The original 10x colours are kept.** The viewer's scan shows the 100x colours by default (`index.html`), and the
