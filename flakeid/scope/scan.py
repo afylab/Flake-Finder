@@ -31,7 +31,7 @@ import numpy as np
 from .settings import Settings, dump
 from flakeid.fieldmosaic import field_size_um, fmt_matrix, format_poly, parse_poly, plan_fields
 
-VERSION = "py-2026-11-24a"
+VERSION = "py-2026-11-25a"
 NAN = float("nan")
 MANUAL_RETAKE = "Manual focus (retakes)"       # the 100x window's button: a retake focused by hand
 IDX100_HEADER = ("order,label,stage_x_um,stage_y_um,z_um,z_drive,z10_um,offset_um,focus,af_ratio,saturated_frac,file,shift_files,"
@@ -2091,10 +2091,11 @@ class Scanner:
         drive's lower limit stops the scan (focus_limit_check; off for the live view's own Autofocus button)."""
         t0 = time.time()
         try:
-            self._af_limit = None
-            r = self._autofocus(zc, p, fine, t0, s_ext=self.s.af_extend if extend is None else int(extend))
-            if limit_check:
-                self.focus_limit_check(float(r[0]) if r[2] else None)
+            for k in range(3):                         # (the operator raised the focus at the limit: the autofocus again)
+                self._af_limit = None
+                r = self._autofocus(zc, p, fine, t0, s_ext=self.s.af_extend if extend is None else int(extend))
+                if not (limit_check and self.focus_limit_check(float(r[0]) if r[2] else None, zc=zc, ask=k < 2)):
+                    break
             if r[2]:                                  # (the last focus found with each objective: a pause's reference)
                 try:
                     self.last_af[getattr(self, "view_scale", 1.0) < 1.0] = (self.core.getXPosition(self.xy), self.core.getYPosition(self.xy), float(r[0]))
@@ -2104,7 +2105,7 @@ class Scanner:
         finally:
             self.op("autofocus", t0)
 
-    def focus_limit_check(self, z=None):
+    def focus_limit_check(self, z=None, zc=None, ask=False):
         """After an autofocus: is the best focus within reach at the focus drive's lower limit?  Either a sweep's sharpest
         place was at or below the limit (sweep: _af_limit; also when the autofocus found no clear focus: below the limit
         every frame is the same, blurred, picture), or the best focus z it found and sent the drive to reads back higher
@@ -2112,17 +2113,23 @@ class Scanner:
         sent (2026-10-27).  A search that only passes the limit on its way, its best focus above it, is fine; a move to z
         refused by max_dz_um is not counted."""
         s = self.s
-        if not self.has_z or not getattr(s, "focus_limit_stop", True):
-            return
+        if not self.has_z or not getattr(s, "focus_limit_stop", True) or getattr(self, "focus_limit_skip", False):
+            return False
         lim = getattr(self, "_af_limit", None)
         if lim is not None:
             z, zr = lim
         else:
             if z is None or isnan(self.z_cmd) or abs(self.z_cmd - z) > 1e-6:
-                return
+                return False
             zr = self.z_read()
             if zr - z <= s.z_reach_tol_um:
-                return
+                return False
+        if ask and getattr(s, "focus_limit_ask", True):
+            r = self.focus_limit_fix(z, zr, zc)
+            if r:
+                return True                             # (raised by the operator: the autofocus again)
+            if r is None:
+                return False                            # (Skip: on as it is)
         what = (f"The best focus is at the focus drive's lower limit: the autofocus wanted Z {f1(z)} um, the drive stops at "
                 f"{f1(zr)} um ({self.cur_phase}).  Every picture from here would be out of focus, so the scan stopped.  "
                 "Bring the sample's focus nearer the middle of the drive's travel (coarse focus) or check the Oasis focus "
@@ -2136,6 +2143,67 @@ class Scanner:
             self.say(f"  (no message sent: {e})")
         self.stop_all = True
         raise Stop(f"the best focus is at the focus drive's lower limit (Z {f1(zr)} um)")
+
+    def focus_limit_fix(self, z_want, z_stop, zc):
+        """(2026-11-25) The best focus is below the focus drive's lower limit (focus_limit_check): instead of stopping,
+        the operator is alerted (sound, Slack / email) and asked, in a live view, to turn the coarse knob and refocus with
+        the fine knob until the drive is focus_limit_margin_um above its limit.  The coarse knob is not seen by the
+        drive, so every focus height the scan knows is shifted by the change (z_shift: the drive's reading in focus less
+        the focus expected here, zc), as the pause check and the "coarse knob too" answer do; the limits (kept in the
+        scan's Z) move with it.  True: fixed (the autofocus runs again); None: Skip (on as it is, the limit no longer
+        stops the scan or asks); False: Stop or no answer (the scan stops, as before)."""
+        s = self.s
+        try:
+            obj = self.objective_name(self.nose.position()) if getattr(self, "nose", None) is not None else None
+        except Exception:
+            obj = None
+        L = self.z_limits.get("lower")
+        lim = min(float(L["z"]), z_stop) if L else z_stop
+        need = float(getattr(s, "focus_limit_margin_um", 30.0))
+        z_exp = zc if zc is not None and not isnan(zc) else z_want
+        self.say(f"  FOCUS DRIVE AT ITS LOWER LIMIT ({self.cur_phase}): the autofocus wanted Z {f1(z_want)} um, the drive stops "
+                 f"at {f1(z_stop)} um: the operator is asked to raise the focus with the coarse knob; the scan waits")
+        self.alert(f"{s.name}: the focus drive is at its lower limit ({self.cur_phase}, Z {f1(z_stop)} um).  Turn the coarse "
+                   "knob and refocus with the fine knob in the scan program's window; the scan waits.")
+        msg = ""
+        for _ in range(3):
+            a = self.ask_focus(
+                f"{s.name}: focus drive at its lower limit",
+                msg + f"The focus here is below the lowest point the focus drive can reach (it stops at Z {f1(lim)} um), so "
+                "every picture from here would be out of focus.\n\nTurn the COARSE knob a little, then focus the live view "
+                "with the FINE knob (or the Z buttons).  If Z (under the live view) went down, turn the coarse knob the "
+                f"other way.  Repeat until the picture is sharp with Z at {f1(lim + need)} um or higher ({f1(need)} um above "
+                "the limit), then press \"In focus, away from the limit\".  The scan shifts every focus height it knows by "
+                "the change and goes on.\n\n\"Skip\": go on as it is (pictures needing focus below the limit stay out of "
+                "focus).  \"Stop\": stop the scan.",
+                float(getattr(s, "focus_limit_wait_s", 0) or 0) or None, button="In focus, away from the limit", cross=False)
+            if a == 1:
+                self.focus_limit_skip = True
+                self.say("  focus drive limit: skipped by the operator: going on as it is (no more stops or questions for it)")
+                return None
+            if a != 0:
+                self.say("  focus drive limit: " + ("stopped by the operator" if a == 2 else "no answer"))
+                return False
+            if obj and self.wait_objective(obj, "Put the objective back (the focus was set with it).") is False:
+                return False
+            zm = self.z_read()
+            if zm - lim >= need:
+                break
+            msg = (f"Z is {f1(zm)} um, only {f1(zm - lim)} um above the drive's limit ({f1(need)} um needed): turn the coarse "
+                   "knob further.\n\n")
+            self.say(f"  focus drive limit: Z {f1(zm)} um is only {f1(zm - lim)} um above the limit: asked again")
+        else:
+            return False
+        dz = zm - z_exp
+        self.z_shift += dz
+        for Lm in self.z_limits.values():               # (the drive's limits stay where they are: in the scan's Z they move)
+            Lm["z"] -= dz
+            Lm["sent"] -= dz
+        self._af_limit = None
+        self.say(f"  focus raised by the operator (coarse knob): in focus at Z {f3(zm)} where {f3(z_exp)} was expected: every "
+                 f"focus height from now on is shifted by {dz:+.1f} um (in all {self.z_shift:+.1f} um); the drive's limit is "
+                 f"now {f1(lim - dz)} um in the scan's Z; autofocus again")
+        return True
 
     def _autofocus(self, zc, p, fine, t0, s_ext=2):
         s = self.s

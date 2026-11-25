@@ -130,6 +130,13 @@ class Settings:
     z_reach_tol_um: float = 1.0
     focus_limit_stop: bool = True          # an autofocus whose best focus is at the focus drive's lower limit stops the
                                            # scan with a message (Scanner.focus_limit_check; passing the limit on the way: fine)
+    # (2026-11-25) ... unless the operator fixes it: an alert (sound, Slack / email) and a live view; the coarse knob turned
+    # and the fine knob refocused until the drive is focus_limit_margin_um above its limit, then every focus height is
+    # shifted by the change (z_shift) and the autofocus runs again.  No answer within focus_limit_wait_s: stops as before.
+    # focus_limit_ask False: stops at once, as before
+    focus_limit_ask: bool = True
+    focus_limit_margin_um: float = 30.0
+    focus_limit_wait_s: float = 1800.0
     z_stepsize_um: float = 0.0250 / 12.0
     z_scale: float = 12.0
     focus_surface: str = "quadratic"
