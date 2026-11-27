@@ -61,6 +61,10 @@ def main(argv=None):
                     "apart, amber tape over the outer edge of each block; centres marked up to ~0.4 mm off.  PASS also needs "
                     "every chip covered (less the taped band) and the run file's blocks")
     ap.add_argument("--graphite", action="store_true")
+    ap.add_argument("--z-lag-reads", type=int, default=0, help="after a Z move of over 20 um, this many readings come back "
+                    "halfway along it (a drive still moving when read; a false 'limit' unless read again)")
+    ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                    help="override one scan setting after the harness's own (e.g. --set af_stacks=all)")
     ap.add_argument("--profile", help="the scan profile (settings.SCAN_PROFILES; the Chips window's choice), e.g. jordan_oct20")
     ap.add_argument("--verbose", action="store_true", help="the scan's detailed log (each autofocus)")
     ap.add_argument("--ir-blur", type=float, help="the domain camera's defocus blur (px per um; default the simulator's 2.5): "
@@ -183,6 +187,24 @@ def main(argv=None):
     # the simulated microscope
     first = centres[0]
     core = MockCore(UM, M10, first[0], first[1], seed=1)
+    lag = {"n": 0, "from": 0.0, "served": 0}
+    if a.z_lag_reads:
+        _set, _get = core.setPosition, core.getPosition
+
+        def _set_lag(*args):
+            z_old = core.z
+            _set(*args)
+            if abs(core.z - z_old) > 20.0:
+                lag["n"], lag["from"] = a.z_lag_reads, z_old
+
+        def _get_lag(dev=None):
+            v = _get(dev)
+            if lag["n"] > 0:
+                lag["n"] -= 1
+                lag["served"] += 1
+                return (lag["from"] + 0.5 * (core.z - lag["from"])) * core.z_scale
+            return v
+        core.setPosition, core.getPosition = _set_lag, _get_lag
     MMD = np.asarray(core.MD, float)
     if a.ir_blur:
         core.blurD = a.ir_blur
@@ -370,6 +392,13 @@ def main(argv=None):
              targets_wait_s=900.0, focus_mode="auto", material="graphite" if a.graphite else "hbn", domain_camera="DomainCam",
              domain_camera_props=(), domain_exposure_ms=4.0, piece_materials=[list(q) for q in pm] if pm else None,
              domain_xy_offset_um=tuple(OFFD - OFF100), verbose=a.verbose, local_analysis=False)
+    for kv in a.set:                                     # (--set NAME=VALUE: numbers, true/false, else text)
+        k, v = kv.split("=", 1)
+        try:
+            v = json.loads(v)
+        except ValueError:
+            pass
+        setattr(s, k, v)
     if a.profile:
         s.scan_profile = a.profile
     if a.mounted:                                      # (mounted 1 cm chips, scaled: 4 mm nominal, centres within 0.4 mm)
@@ -473,6 +502,8 @@ def main(argv=None):
         notify.job_end(sc, err is None, False, 99.0)
         notify.flush(60)
     print(f"stage timeouts simulated: {getattr(core, 'n_timeouts', 0)}")
+    if a.z_lag_reads:
+        print(f"HARNESS lagging Z readings served: {lag['served']}", flush=True)
     print(f"run time {time.time() - t_start:.0f} s, {core.snaps} snaps{'' if err is None else ', ERROR ' + str(err)}")
     from flakeid.scope.settings import Settings
     zst = Settings().z_settle_ms                       # (the microscope's setting; the simulation runs without the wait)

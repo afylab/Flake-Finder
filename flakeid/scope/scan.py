@@ -31,7 +31,7 @@ import numpy as np
 from .settings import Settings, dump
 from flakeid.fieldmosaic import field_size_um, fmt_matrix, format_poly, parse_poly, plan_fields
 
-VERSION = "py-2026-11-27a"
+VERSION = "py-2026-11-27b"
 NAN = float("nan")
 MANUAL_RETAKE = "Manual focus (retakes)"       # the 100x window's button: a retake focused by hand
 IDX100_HEADER = ("order,label,stage_x_um,stage_y_um,z_um,z_drive,z10_um,offset_um,focus,af_ratio,saturated_frac,file,shift_files,"
@@ -992,7 +992,40 @@ class Scanner:
             return self.z_cmd
         zr = self.z_read()
         if abs(zr - self.z_cmd) > self.s.z_reach_tol_um:
+            zr = self.z_read_settled(zr, where)
+        if abs(zr - self.z_cmd) > self.s.z_reach_tol_um:
             self.z_limit_hit(self.z_cmd, zr, where)
+        return zr
+
+    def z_read_settled(self, zr, where):
+        """(2026-11-27) The drive read back zr, short of the last Z sent (z_cmd): read again z_limit_recheck_ms apart
+        while it is still moving (a reading taken before the move ended is not a limit), and when it stands short, sent
+        there once more (a stall is not a limit either).  Returns the last reading: still short, a limit (z_limit_hit)."""
+        s, z, tol = self.s, self.z_cmd, self.s.z_reach_tol_um
+        first = zr
+        for attempt in range(2):
+            for _ in range(max(0, int(getattr(s, "z_limit_rechecks", 4)))):
+                if abs(zr - z) <= tol:
+                    break
+                time.sleep(max(0.0, float(getattr(s, "z_limit_recheck_ms", 150.0))) / 1000.0)
+                try:
+                    self.core.waitForDevice(self.zdev)
+                except Exception:
+                    pass
+                z2 = self.z_read()
+                moving = abs(z2 - zr) > 0.2
+                zr = z2
+                if not moving:
+                    break
+            if abs(zr - z) <= tol or attempt == 1:
+                break
+            self.set_z(z)                                # (standing short: sent there once more)
+            zr = self.z_read()
+        if abs(zr - z) <= tol:
+            self._z_late = getattr(self, "_z_late", 0) + 1
+            if self._z_late <= 5:
+                self.say(f"    focus drive read {f3(first)} um when sent to {f3(z)} um, then reached it: still moving "
+                         f"(or stalled) when read, not a limit ({where})")
         return zr
 
     def z_limit_hit(self, sent, read, where):
@@ -2032,6 +2065,7 @@ class Scanner:
         if self.set_z(zs[0] - self.s.af_backlash_um):
             self.check_z_reach("autofocus sweep")
         need, out = self.af_min_substrate(), []
+        keep, frames = self._stack_plan(len(zs)), {}
         for i, z in enumerate(zs):
             if self.set_z(z):
                 self._af_frame = None
@@ -2039,6 +2073,8 @@ class Scanner:
                 fa = getattr(self, "_af_frame", None)
                 if fa is not None:
                     br[i] = float(np.asarray(fa)[::4, ::4].mean())
+                    if keep is not None and i in keep:
+                        frames[i] = np.array(fa, copy=True)
                 if need > 0 and getattr(self, "_af_frame", None) is not None:
                     fr = self.substrate_fraction(self.blocks(self._af_frame))
                     if fr < need:                        # (not the chip: the holder, tape, glue in focus)
@@ -2054,9 +2090,60 @@ class Scanner:
         L = self.z_limits.get("lower")
         if L is not None and ms[bi] > 0 and zs[bi] <= float(L["z"]) + self.s.z_reach_tol_um:
             # (the sharpest place of the sweep at or below the drive's lower limit: below it every frame is taken at the
-            # limit, the same picture; the best focus within reach is at the limit: focus_limit_check)
-            self._af_limit = (float(zs[bi]), float(L["z"]))
+            # limit, the same picture; the best focus within reach is at the limit: focus_limit_check).  Only with a focus
+            # signal (2026-11-27): a sweep that found nothing has its noise maximum among those identical frames too
+            valid = ms[ms >= 0]
+            r = ms[bi] / max(float(np.sort(valid)[len(valid) // 2]), 1e-9) if len(valid) >= 3 else 0.0
+            if r >= self.s.af_min_ratio:
+                self._af_limit = (float(zs[bi]), float(L["z"]))
+            elif self.s.verbose:
+                self.say(f"      sharpest at the drive's lower limit, but no focus signal there (peak/median {f3(r)}): "
+                         "not a focus below the limit")
+        if keep is not None:
+            self._stack_save(zs, ms, br, frames, roi)
         return bi, ms
+
+    def _stack_plan(self, n):
+        """af_stacks: the indices of a 100x sweep's frames to keep (None: none kept)."""
+        s = self.s
+        if getattr(s, "af_stacks", "off") not in ("weak", "all") or self.cur_phase != "100x imaging" or n < 1:
+            return None
+        m = max(3, int(getattr(s, "af_stacks_max_frames", 61)))
+        if n <= m:
+            return set(range(n))
+        return set(int(i) for i in np.round(np.linspace(0, n - 1, m)))
+
+    def _stack_save(self, zs, ms, br, frames, roi):
+        """af_stacks: one sweep's frames, heights and sharpness to <run folder>/afstacks_<run>/<piece>_<flake>_<n>.npz.
+        "weak": only sweeps with peak/median under af_stacks_weak_ratio, and every af_stacks_every-th other one.  A
+        failed write is logged and never stops the scan."""
+        s = self.s
+        try:
+            valid = ms[ms >= 0]
+            ratio = float(ms.max() / max(float(np.sort(valid)[len(valid) // 2]), 1e-9)) if len(valid) >= 3 else 0.0
+            if s.af_stacks == "weak" and ratio >= s.af_stacks_weak_ratio:
+                self._stack_skipped = getattr(self, "_stack_skipped", 0) + 1
+                ev = int(getattr(s, "af_stacks_every", 0) or 0)
+                if ev <= 0 or self._stack_skipped % ev:
+                    return
+            if not frames:
+                return
+            run_dir = getattr(self, "run_dir", None) or s.local_root
+            d = Path(str(run_dir)) / f"afstacks_{getattr(self, 'run_label', None) or 'run'}"
+            d.mkdir(parents=True, exist_ok=True)
+            self._stack_n = getattr(self, "_stack_n", 0) + 1
+            name = f"{safe_name(getattr(self, 'af_stack_label', '') or 'sweep')}_{self._stack_n:03d}.npz"
+            idx = np.array(sorted(frames), dtype=int)
+            arrs = {f"f{j:03d}": frames[j] for j in idx}
+            np.savez(str(d / name), zs=np.asarray(zs, float), sharp=np.asarray(ms, float), bright=np.asarray(br, float),
+                     idx=idx, ratio=ratio, roi=float(roi), z_scale=float(self.z_scale), z_shift=float(self.z_shift),
+                     label=str(getattr(self, "af_stack_label", "")), time=time.strftime("%Y-%m-%d %H:%M:%S"), **arrs)
+            if s.verbose:
+                self.say(f"      af stack saved: {name} ({len(idx)} of {len(zs)} frames, peak/median {f3(ratio)})")
+        except Exception as e:
+            if not getattr(self, "_stack_err", False):
+                self._stack_err = True
+                self.say(f"      (af stack not saved: {e}; the scan goes on)")
 
     def bright_guess(self, zs, ms, p):
         """(2026-11-24) The first guess of a wide sweep: the height where the picture is brightest (af_bright_first), a
@@ -2094,18 +2181,20 @@ class Scanner:
                 self.say(f"      sharpness spike at Z {f3(zs[i])} ({f3(ms[i])} vs neighbours {f3(nb)}): re-measured {f3(again)}")
             ms[i] = again
 
-    def autofocus(self, zc, p, fine=True, extend=None, limit_check=True):
+    def autofocus(self, zc, p, fine=True, extend=None, limit_check=True, min_ratio=None):
         """Autofocus around zc with p = (coarse range, coarse step, fine range, fine step, roi).  (z, ratio, ok).
         fine=False: the coarse sweep only, the peak refined by a parabola through it and its neighbours (the live view's
         Autofocus button: the scan focuses finely itself later).  fine="fit": the same when the coarse peak is clear
         (inside the sweep, log sharpness curving down around it), else the fine sweep (af100_fit).  extend: how often
         the sweep may move on when the peak is at an end (default af_extend).  limit_check: a best focus at the focus
-        drive's lower limit stops the scan (focus_limit_check; off for the live view's own Autofocus button)."""
+        drive's lower limit stops the scan (focus_limit_check; off for the live view's own Autofocus button).  min_ratio:
+        the peak/median needed instead of af_min_ratio (confirming a focus already found: af_confirm_min_ratio)."""
         t0 = time.time()
         try:
             for k in range(3):                         # (the operator raised the focus at the limit: the autofocus again)
                 self._af_limit = None
-                r = self._autofocus(zc, p, fine, t0, s_ext=self.s.af_extend if extend is None else int(extend))
+                r = self._autofocus(zc, p, fine, t0, s_ext=self.s.af_extend if extend is None else int(extend),
+                                    min_ratio=self.s.af_min_ratio if min_ratio is None else float(min_ratio))
                 if not (limit_check and self.focus_limit_check(float(r[0]) if r[2] else None, zc=zc, ask=k < 2)):
                     break
             if r[2]:                                  # (the last focus found with each objective: a pause's reference)
@@ -2134,6 +2223,8 @@ class Scanner:
             if z is None or isnan(self.z_cmd) or abs(self.z_cmd - z) > 1e-6:
                 return False
             zr = self.z_read()
+            if zr - z > s.z_reach_tol_um:
+                zr = self.z_read_settled(zr, "autofocus result")
             if zr - z <= s.z_reach_tol_um:
                 return False
         if ask and getattr(s, "focus_limit_ask", True):
@@ -2217,7 +2308,7 @@ class Scanner:
                  f"now {f1(lim - dz)} um in the scan's Z; autofocus again")
         return True
 
-    def _autofocus(self, zc, p, fine, t0, s_ext=2):
+    def _autofocus(self, zc, p, fine, t0, s_ext=2, min_ratio=1.10):
         s = self.s
         lo, hi = zc - p[0], zc + p[0]
         best, ratio = zc, 0.0
@@ -2230,7 +2321,7 @@ class Scanner:
                 break
             ratio = ms[bi] / max(float(np.sort(valid)[len(valid) // 2]), 1e-9)
             best = zs[bi]
-            if ratio < s.af_min_ratio:
+            if ratio < min_ratio:
                 break
             if bi == 0 and ext < s_ext:
                 hi = lo + p[1]; lo = hi - 2 * p[0]; continue
@@ -2243,7 +2334,7 @@ class Scanner:
             if s.verbose:
                 self.say(f"      autofocus: first guess Z {f3(bz)} (brightest), sharpest Z {f3(best)} (peak/median {f3(ratio)})")
             best = bz
-        if ratio < s.af_min_ratio and bz is None:
+        if ratio < min_ratio and bz is None:
             if s.verbose:
                 self.say(f"      autofocus: no focus signal (peak/median {f3(ratio)})")
             self.set_z(zc)
@@ -2274,17 +2365,17 @@ class Scanner:
         if bz is not None:
             vf = mf[mf >= 0]
             fr = float(mf[fi]) / max(float(np.sort(vf)[len(vf) // 2]), 1e-9) if len(vf) >= 3 else 0.0
-            if ratio >= s.af_min_ratio and mf[fi] < s.af_bright_keep * sharp_m:
+            if ratio >= min_ratio and mf[fi] < s.af_bright_keep * sharp_m:
                 # (the brightest height led away from the sharp focus: the coarse sweep's sharpest height, as before)
                 self.say(f"      autofocus: brightest Z {f3(bz)} less sharp than Z {f3(sharp_z)}: the sharpest used")
                 zf = sharp_z - p[2] + np.arange(nf) * p[3]
                 fi, mf = self.sweep(zf, p[4])
-            elif ratio < s.af_min_ratio and fr < s.af_min_ratio:
+            elif ratio < min_ratio and fr < min_ratio:
                 if s.verbose:
                     self.say(f"      autofocus: no focus signal (peak/median {f3(ratio)}; {f3(fr)} around the brightest Z {f3(bz)})")
                 self.set_z(zc)
                 return (zc, ratio, False)
-            elif ratio < s.af_min_ratio:
+            elif ratio < min_ratio:
                 ratio = fr                               # (no edges in the coarse sweep: focus found at the brightest)
         z = float(zf[fi])
         pos = mf > 0
@@ -2700,6 +2791,8 @@ class Scanner:
             zr = self.z_cmd
         else:
             zr = self.z_read()
+            if cached and not isnan(self.z_cmd) and abs(zr - self.z_cmd) > self.s.z_reach_tol_um:
+                zr = self.z_read_settled(zr, f"tile {label}")
             if cached and not isnan(self.z_cmd) and abs(zr - self.z_cmd) > self.s.z_reach_tol_um:
                 self.z_limit_hit(self.z_cmd, zr, f"tile {label}")
             elif cached and not isnan(self.z_cmd) and abs(zr - self.z_cmd) > 0.5:
@@ -7396,6 +7489,7 @@ class Scanner:
         retake = retake_k is not None
         self.set_phase("100x imaging")
         x, y, z10, th, lab = t
+        self.af_stack_label = f"{s.name}_{lab}" + ("_retake" if retake else "")   # (af_stacks: the saved sweeps' names)
         xs = getattr(self, "xy_shift", None)
         if xs is not None and xs.any():              # (the stage's shift found by hand: lost_position)
             x, y = x + float(xs[0]), y + float(xs[1])
@@ -7489,7 +7583,10 @@ class Scanner:
                         self.say("    focus found near the prediction: the far result is not used")
                         r = r2
                     else:
-                        r3 = r2 if (r2[2] and abs(r2[0] - far[0]) <= s.af_agree_um) else self.autofocus(far[0], s.af100)
+                        # confirmed by a sweep centred on the far focus, wide enough that its median frame is out of focus
+                        # (af100's +-2.4 um: peak/median under 1.10 on low-contrast hBN, the real focus thrown away)
+                        r3 = r2 if (r2[2] and abs(r2[0] - far[0]) <= s.af_agree_um) else self.autofocus(
+                            far[0], s.af_confirm, extend=0, min_ratio=s.af_confirm_min_ratio)
                         if r3[2] and abs(r3[0] - far[0]) <= s.af_agree_um:
                             self.say(f"    the same focus found again ({f3(far[0])}, {f3(r3[0])})")
                             r, jump = r3, r3[0] - zg

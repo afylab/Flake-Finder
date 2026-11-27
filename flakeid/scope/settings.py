@@ -128,6 +128,11 @@ class Settings:
     # controller's lower / upper limit; BN_15_auto 20261025_run_4 stopped at -181.9 um, 33 of 58 100x pictures out of
     # focus): logged, and one message (Slack / email) per direction and job
     z_reach_tol_um: float = 1.0
+    # (2026-11-27) a drive read back short is read again before it counts as a limit: z_limit_rechecks times,
+    # z_limit_recheck_ms apart, while it is still moving; still short and standing, it is sent there once more.  A scan
+    # was asked to raise the focus "at the drive's lower limit" although the drive went lower by hand right after
+    z_limit_recheck_ms: float = 150.0
+    z_limit_rechecks: int = 4
     focus_limit_stop: bool = True          # an autofocus whose best focus is at the focus drive's lower limit stops the
                                            # scan with a message (Scanner.focus_limit_check; passing the limit on the way: fine)
     # (2026-11-25) ... unless the operator fixes it: an alert (sound, Slack / email) and a live view; the coarse knob turned
@@ -170,6 +175,21 @@ class Settings:
     af_dev_per_mm: float = 0.5
     af_max_dev_cap: float = 8.0
     af_agree_um: float = 1.5
+    # a focus found far from the prediction (and not near it) is confirmed by a sweep centred on it (2026-11-27): af100's
+    # +-2.4 um there gave peak/median 1.06-1.095 on low-contrast hBN (every frame near focus, so the median frame is sharp
+    # too) and threw away the real focus of 11 flakes in bn_112526_run_1; +-8 um puts the median frame out of focus, and
+    # the same peak again (within af_agree_um) needs only af_confirm_min_ratio
+    af_confirm: tuple = (8.0, 1.0, 1.0, 0.25, 0.9)
+    af_confirm_min_ratio: float = 1.03
+    # (2026-11-27) through-focus stacks of the 100x autofocus sweeps, to tune the focus metric on thin and plain hBN
+    # (bn_112526_run_1: 3 of 9 flakes under 20 nm failed, 6 of 138 over 40 nm).  "off"; "weak": sweeps whose
+    # peak/median is under af_stacks_weak_ratio, plus every af_stacks_every-th other sweep (references); "all".  The raw
+    # frames (np.savez, uncompressed: fast) go to <run folder>/afstacks_<run>/ on this PC, not to the share (~3 MB a
+    # frame); at most af_stacks_max_frames frames a sweep (evenly spread; every height's sharpness is kept)
+    af_stacks: str = "off"
+    af_stacks_weak_ratio: float = 1.25
+    af_stacks_every: int = 10
+    af_stacks_max_frames: int = 61
     # Pause / Resume (the main window's Pause button; 2026-10-27): at Resume the focus where the scan paused is measured
     # again (autofocus) and a change beyond pause_refocus_tol_um (10x, 100x) shifts every later Z by it (the coarse knob
     # is not seen by the drive); above pause_refocus_warn_um a message too.  pause_refocus False: no focus check
