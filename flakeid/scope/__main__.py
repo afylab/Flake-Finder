@@ -257,6 +257,16 @@ def _main(argv=None):
             ov[k_.strip()] = json.loads(v_)
         except ValueError:
             ov[k_.strip()] = v_
+    try:                                    # (the experimental program: its own settings beside the shared ones; --set wins)
+        from . import update as _upd
+        if _upd.experimental():
+            ef = _upd.ROOT.parent / "scan_settings_exp.json"
+            if ef.is_file():
+                for k_, v_ in json.loads(ef.read_text(encoding="utf-8")).items():
+                    ov.setdefault(k_, v_)
+                print(f"flakeid.scope: experimental settings {ef}", flush=True)
+    except (OSError, ValueError) as e:
+        print(f"(scan_settings_exp.json not read: {e})", flush=True)
     ov["settings_file"] = a.settings or ""
     if not a.mode and not a.headless:
         ov["ask_mode"] = True               # (the desktop shortcut: a start screen chooses scan / flat field / capture)

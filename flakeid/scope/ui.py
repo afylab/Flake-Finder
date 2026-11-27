@@ -49,18 +49,35 @@ def dpi_aware():
 ASSETS = __import__("pathlib").Path(__file__).parent / "assets"
 
 
+def exp_info():
+    """The experimental program (update.experimental): (branch, sha) of its installed version; None for the stable one."""
+    try:
+        from . import update as U
+        if U.experimental():
+            v = U.installed()
+            return (v.get("branch") or "?", (v.get("sha") or "")[:7])
+    except Exception:
+        pass
+    return None
+
+
+EXP_BG, EXP_FG = "#f2851a", "#ffffff"
+
+
 def set_icon(root):
-    """The logo (assets/logo.ico, logo_*.png) as the icon of every window; returns the PhotoImages (keep a reference)."""
+    """The logo (assets/logo.ico, logo_*.png) as the icon of every window; the experimental program's has an orange EXP
+    badge (logo_exp*, tools/make_exp_icon.py).  Returns the PhotoImages (keep a reference)."""
     import sys
     imgs = []
+    pre = "logo_exp" if exp_info() and (ASSETS / "logo_exp_256.png").is_file() else "logo"
     try:
-        imgs = [tk.PhotoImage(master=root, file=str(ASSETS / f"logo_{n}.png")) for n in (256, 64, 48, 32, 16)]
+        imgs = [tk.PhotoImage(master=root, file=str(ASSETS / f"{pre}_{n}.png")) for n in (256, 64, 48, 32, 16)]
         root.iconphoto(True, *imgs)
     except Exception:
         pass
     if sys.platform == "win32":
         try:
-            root.iconbitmap(default=str(ASSETS / "logo.ico"))       # (crisp at every size in the title bar and taskbar)
+            root.iconbitmap(default=str(ASSETS / f"{pre}.ico"))     # (crisp at every size in the title bar and taskbar)
         except Exception:
             pass
     return imgs
@@ -574,7 +591,8 @@ class TkUI:
         st = ttk.Style(self.root)
         self.bg = str(st.lookup("TFrame", "background") or st.lookup(".", "background") or self.root.cget("bg"))
         self.root.configure(bg=self.bg)
-        self.root.title(title)
+        ex = exp_info()
+        self.root.title(title + (f"  -  EXPERIMENTAL ({ex[0]} {ex[1]})" if ex else ""))
         self.q = queue.Queue()
         self.can_ask = True
         self.headless_analysis_off = False
@@ -662,6 +680,15 @@ class TkUI:
         if w is not None and getattr(w, "upd_sync", None):
             w.upd_sync()
 
+    def _exp_banner(self, w, below):
+        """The experimental program: an orange banner above `below` (the main window, the start screen)."""
+        ex = exp_info()
+        if not ex:
+            return
+        tk.Label(w, bg=EXP_BG, fg=EXP_FG, font=("Segoe UI", 11, "bold"), anchor="w", padx=10, pady=5,
+                 text=f"EXPERIMENTAL program: branch {ex[0]} ({ex[1]}).  The stable one is the \"FlakeIdentifier scan\" "
+                      "shortcut.").pack(fill="x", before=below)
+
     def _start_update_bar(self, w, below, open_update):
         """The banner at the top of the start screen (w), above its frame `below`; its Update... opens the update window."""
         st = {"bar": None}
@@ -691,6 +718,7 @@ class TkUI:
         top = ttk.Frame(r)
         top.pack(fill="x", padx=8, pady=(8, 4))
         self._main_top = top
+        self._exp_banner(r, top)
         try:
             self._logo = tk.PhotoImage(master=r, file=str(ASSETS / "logo_32.png"))
             ttk.Label(top, image=self._logo).pack(side="left", padx=(0, 8))
@@ -1527,6 +1555,7 @@ class TkUI:
             ttk.Label(lb, text=f"  (exposure {s0.exposure_ms:g} ms, as the 10x scan)", foreground="#9a96b8").pack(side="left")
             ttk.Button(lb, text="Update...", width=10, command=lambda: (close_live(), self.update_window(scanner, w))).pack(side="left", padx=(16, 0))
             self._start_update_bar(w, f, lambda: (close_live(), self.update_window(scanner, w)))
+            self._exp_banner(w, f)
             b = ttk.Frame(f)
             b.grid(row=37, column=2, sticky="e", pady=(12, 0))
             ttk.Button(b, text="Start", style="Accent.TButton", width=10, command=ok).pack(side="left", padx=6)
@@ -1547,8 +1576,17 @@ class TkUI:
         w.transient(parent)
         f = ttk.Frame(w, padding=16)
         f.pack(fill="both", expand=True)
-        ttk.Label(f, text="Update from GitHub", font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        ttk.Label(f, text=f"{s0.update_repo}, branch {s0.update_branch}; program folder {U.ROOT}", foreground="#9a96b8").pack(anchor="w")
+        exp = U.experimental()
+        ttk.Label(f, text="Update from GitHub" + (" (experimental program)" if exp else ""), font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(f, text=f"{s0.update_repo}, " + ("" if exp else f"branch {s0.update_branch}; ") + f"program folder {U.ROOT}",
+                  foreground="#9a96b8").pack(anchor="w")
+        brv = tk.StringVar(value=U.branch_for(s0))
+        if exp:                                         # (only the experimental program chooses a branch)
+            bfr = ttk.Frame(f)
+            bfr.pack(anchor="w", pady=(8, 0))
+            ttk.Label(bfr, text="Branch:").pack(side="left")
+            brc = ttk.Combobox(bfr, textvariable=brv, values=[brv.get()], width=36, state="readonly")
+            brc.pack(side="left", padx=6)
         txt = tk.Text(f, width=92, height=16, wrap="word", font=("Consolas", 9), relief="flat")
         txt.pack(fill="both", expand=True, pady=(10, 6))
         bf = ttk.Frame(f)
@@ -1587,8 +1625,14 @@ class TkUI:
                     "backed up first; flat fields and settings stay), then the program starts again.")
 
         def work_check():
+            if exp:
+                try:
+                    names = U.branches(s0)
+                    self._post(lambda n=names: brc.configure(values=n) if w.winfo_exists() else None)
+                except Exception as e:
+                    say(f"(branches not listed: {e})")
             try:
-                c, err = U.check(s0), None
+                c, err = U.check(s0, branch=brv.get()), None
             except U.UpdateError as e:
                 c, err = None, str(e)
             except Exception as e:
@@ -1614,7 +1658,8 @@ class TkUI:
             # in its own Python process (update.child_command): whatever goes wrong there cannot end this program
             import subprocess
             info, err = None, None
-            args = ["--result"] + (["--settings", s0.settings_file] if getattr(s0, "settings_file", "") else [])
+            args = (["--result"] + (["--settings", s0.settings_file] if getattr(s0, "settings_file", "") else [])
+                    + (["--branch", st["branch"]] if exp else []))
             env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
             try:
                 p = subprocess.Popen(U.child_command(args), cwd=str(U.ROOT), env=env, stdout=subprocess.PIPE,
@@ -1643,11 +1688,22 @@ class TkUI:
                 say(f"\nNot now: {why}.")
                 return
             st["busy"] = True
+            st["branch"] = brv.get()
             inst.configure(state="disabled")
             close_b.configure(state="disabled")
             say("")
             threading.Thread(target=work_install, name="update", daemon=True).start()
         inst.configure(command=start_install)
+
+        def branch_changed(_e=None):                    # (another branch: what installing it would bring)
+            if st["busy"]:
+                return
+            inst.configure(state="disabled")
+            txt.delete("1.0", "end")
+            say(f"Asking GitHub about {brv.get()} ...")
+            threading.Thread(target=work_check, name="update check", daemon=True).start()
+        if exp:
+            brc.bind("<<ComboboxSelected>>", branch_changed)
         w.protocol("WM_DELETE_WINDOW", lambda: None if st["busy"] else w.destroy())
         say("Asking GitHub ...")
         threading.Thread(target=work_check, name="update check", daemon=True).start()

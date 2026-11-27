@@ -30,13 +30,17 @@ def main(argv=None):
     ap.add_argument("--cfg", default=r"C:\Program Files\Micro-Manager-2.0\autoscan_withir.cfg")
     ap.add_argument("--settings", default=str(DEST / "scan_settings.json"))
     ap.add_argument("--no-pin", action="store_true", help="do not pin it to the taskbar")
+    ap.add_argument("--code", default=str(DEST / "FlakeIdentifier"), help="the program folder (the experimental program: "
+                    "C:\\FlakeID\\FlakeIdentifier_exp, made by run_flakeid.bat update --experimental BRANCH)")
+    ap.add_argument("--name", default=NAME, help="the shortcut's name")
+    ap.add_argument("--icon", help="the icon (default: the program folder's flakeid/scope/assets/logo.ico)")
     a = ap.parse_args(argv)
     if sys.platform != "win32":
         print("Windows only")
         return 1
     pyw = DEST / "python38" / "pythonw.exe"
-    code = DEST / "FlakeIdentifier"
-    icon = code / "flakeid" / "scope" / "assets" / "logo.ico"
+    code = Path(a.code)
+    icon = Path(a.icon) if a.icon else code / "flakeid" / "scope" / "assets" / "logo.ico"
     for p in (pyw, code, icon):
         if not p.exists():
             print(f"missing: {p}")
@@ -47,7 +51,7 @@ def main(argv=None):
     vbs = f"""
 Set sh = CreateObject("WScript.Shell")
 desk = sh.SpecialFolders("Desktop")
-lnkPath = desk & "\\{NAME}.lnk"
+lnkPath = desk & "\\{a.name}.lnk"
 Set lnk = sh.CreateShortcut(lnkPath)
 lnk.TargetPath = {vbs_str(pyw)}
 lnk.Arguments = {vbs_str(args)}
@@ -59,7 +63,7 @@ WScript.Echo "desktop shortcut: " & lnkPath
 pin = {"False" if a.no_pin else "True"}
 If pin Then
   Set app = CreateObject("Shell.Application")
-  Set item = app.Namespace(desk).ParseName("{NAME}.lnk")
+  Set item = app.Namespace(desk).ParseName("{a.name}.lnk")
   done = False
   For Each v In item.Verbs
     n = LCase(Replace(v.Name, "&", ""))
