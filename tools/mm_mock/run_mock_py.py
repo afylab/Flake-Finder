@@ -96,6 +96,15 @@ def main(argv=None):
     ap.add_argument("--stage-xmax", type=float, help="the stage's travel ends this far (um) in +x from the right-most chip's centre "
                     "(it stops there, as the real stage at its limit): that chip is scanned up to it (PASS: the reachable part "
                     "covered, no move beyond, the flakes in reach imaged)")
+    ap.add_argument("--stage-ymax-edge", type=float, help="the stage's travel ends this far (um) beyond the +y edge of the chip "
+                    "furthest in +y (the last one scanned): its edges are in reach, but not all of its margin tiles / focus "
+                    "points, so the limit is met after the plan (2026-11-27: a run stopped 40 min in).  PASS: the run ends "
+                    "done, every planned tile saved or in tiles_skipped.json, none saved beyond the limit, the chip covered up to it")
+    ap.add_argument("--ylimit-tiles", action="store_true", help="with --stage-ymax-edge: the limit only exists from the 10x "
+                    "tiles on (met in the middle of the tile scan, after the plan; the edge walk did not see it)")
+    ap.add_argument("--learned-ymax", type=float, help="a +y stage limit learned in an earlier run (stage_limits.json) this "
+                    "far (um) below the centre of the chip furthest in +y: that chip's centre is out of reach.  PASS: that chip "
+                    "fails (beyond the stage's travel) and the run goes on to the end with the others")
     ap.add_argument("--slack", action="store_true", help="Slack bot messages to a stand-in Slack server (tools/mm_mock/slack_standin.py): "
                     "PASS also needs the run's thread, its replies (each chip's plan picture, the end) in the DM and the channel")
     a = ap.parse_args(argv)
@@ -222,6 +231,20 @@ def main(argv=None):
                 core.setXYPosition(GAPX + a.gap + 10.0, sy)
         core.mockEdge = mock_edge
     core.z = true_focus(*first) + 2.0
+    ymax, SC = None, [None]
+    if a.stage_ymax_edge is not None:
+        iy = int(np.argmax([q[1] for q in centres]))
+        m_, sc_, shp_ = masks[iy]
+        ys_, xs_ = np.nonzero(m_)
+        ymax = float(img_to_stage(np.c_[xs_, ys_] / sc_, shp_, chips[iy][1])[:, 1].max()) + a.stage_ymax_edge
+        _set_ylim = core.setXYPosition
+
+        def set_xy_ylim(*args):                        # the stage stops at the end of its travel in +y
+            if a.ylimit_tiles and getattr(SC[0], "cur_phase", None) != "10x tiles":
+                return _set_ylim(*args)
+            _set_ylim(*args[:-1], min(float(args[-1]), ymax))
+        core.setXYPosition = set_xy_ylim
+        print(f"stage travel ends at y = {ymax:.1f} ({a.stage_ymax_edge:g} um beyond the +y edge of chip {names[iy]})")
     xmax = None
     if a.stage_xmax is not None:
         xmax = max(q[0] for q in centres) + a.stage_xmax     # (beyond the right-most chip: the others are reachable)
@@ -308,6 +331,12 @@ def main(argv=None):
                     if not pos.exists() or not tiles.exists():
                         continue
                     n_plan = len(json.loads(pos.read_text())["map"]["StagePositions"]["array"])
+                    skf = tiles / "tiles_skipped.json"       # (as flakeid.live: tiles beyond the stage's travel not waited for)
+                    if skf.is_file():
+                        try:
+                            n_plan -= len(json.loads(skf.read_text()))
+                        except ValueError:
+                            pass
                     if len(list(tiles.glob("*/metadata.txt"))) < n_plan:
                         continue
                     c = np.array(p["center"])
@@ -402,9 +431,21 @@ def main(argv=None):
         notify.SLACK_API = "http://127.0.0.1:8814/api/"
         os.environ["FLAKEID_SLACK_TOKEN"] = "xoxb-test"
         s.notify_to, s.notify_slack_channel, s.local_root = "Test Operator", "#microscope", str(out)
+    try:                                               # (limits learned in an earlier simulated run must not carry over)
+        (Path(s.local_root) / "stage_limits.json").unlink()
+    except OSError:
+        pass
+    iy_learned = None
+    if a.learned_ymax is not None:
+        iy_learned = int(np.argmax([q[1] for q in centres]))
+        s.local_root = str(out)
+        (out / "stage_limits.json").write_text(json.dumps({core.getXYStageDevice(): [None, None, None,
+                                                           float(centres[iy_learned][1]) - a.learned_ymax]}))
+        print(f"learned stage limit: y max {centres[iy_learned][1] - a.learned_ymax:.1f} (chip {names[iy_learned]} centre beyond it)")
     ui = AutoUI(core, analysis=False)
     t_start = time.time()
     sc = Scanner(core, s, ui)
+    SC[0] = sc
     # what the operations would cost on the microscope (20261014_run_1: a frame 117 ms, an XY move 442 ms with its
     # readback, a Z move 38 ms + z_settle_ms; an unanswered focus question focus_dialog_timeout_s): the simulator has no
     # time of its own, so this estimate is what to compare between versions
@@ -490,6 +531,10 @@ def main(argv=None):
         nm = p["name"]
         c = np.array(p["center"])
         ci = int(np.argmin([np.hypot(*(c - q)) for q in centres]))
+        if iy_learned is not None and ci == iy_learned:
+            print(f"{nm}: centre beyond the learned stage limit: state {p['state']} (expected failed)")
+            ok &= p["state"] == "failed"
+            continue
         m, scl, shape = masks[ci]
         pose = chips[ci][1]
         pos = json.loads((run_dir / f"{nm}_scan.pos").read_text())["map"]["StagePositions"]["array"]
@@ -519,6 +564,28 @@ def main(argv=None):
                     under |= (st_[:, 0] >= x0_) & (st_[:, 0] <= x1_) & (st_[:, 1] >= y0_) & (st_[:, 1] <= y1_)
                 mm_[yy_[under], xx_[under]] = False
             covered = float((cover[mm_] > 0).mean())
+        if ymax is not None:                           # tiles beyond the limit left out (listed), the rest saved, none beyond
+            tdir = run_dir / f"{nm}_tiles"
+            sk = tdir / "tiles_skipped.json"
+            skl = set(json.loads(sk.read_text())) if sk.is_file() else set()
+            saved = {}
+            for md in tdir.glob("*/metadata.txt"):
+                fm_ = next(v for k, v in json.loads(md.read_text()).items() if k.startswith("Metadata"))
+                saved[md.parent.name] = (fm_["XPositionUm"], fm_["YPositionUm"])
+            labs = {f"Pos-{int(q['GridCol']['scalar']):03d}_{int(q['GridRow']['scalar']):03d}" for q in pos}
+            lost = labs - set(saved) - skl
+            over = [v for v in saved.values() if v[1] > ymax + 1.0]
+            yy_, xx_ = np.nonzero(m)
+            st_ = img_to_stage(np.c_[xx_, yy_] / scl, shape, pose)
+            reach_ = st_[:, 1] <= ymax - fov[1] / 2
+            cov2 = np.zeros(m.shape, np.uint8)
+            for v in saved.values():
+                cs = np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]]) * fov / 2 + np.array(v)
+                cv2.fillPoly(cov2, [np.round(stage_to_img(cs, shape, pose) * scl).astype(np.int32)], 1)
+            cr = float((cov2[yy_[reach_], xx_[reach_]] > 0).mean()) if reach_.any() else 1.0
+            print(f"{nm}: stage limit y {ymax:.1f}: {len(saved)} tiles saved, {len(skl)} left out (tiles_skipped.json), "
+                  f"{len(lost)} neither, {len(over)} saved beyond the limit; chip in reach covered {cr:.3f}")
+            ok &= not lost and not over and cr > 0.98
         zt = []
         for md in (run_dir / f"{nm}_tiles").glob("*/metadata.txt"):
             d = json.loads(md.read_text())
