@@ -20,6 +20,17 @@ An update does for the code what setup_scope_pc.bat does, from the repository in
   4. run_flakeid.bat copied to C:/FlakeID, installed_version.json written
   5. the program restarted (the new one waits for this one to end: one program at a time holds the microscope)
 
+The experimental program (2026-11-27): a second install beside the stable one, for trying a branch ("nightly"
+builds) while the stable program keeps following update_branch (main):
+
+    C:\\FlakeID\\run_flakeid.bat update --experimental exp-af-stacks
+
+makes or updates C:/FlakeID/FlakeIdentifier_exp from that branch (the same Python, scan_settings.json and flat fields;
+settings only it knows go in C:/FlakeID/scan_settings_exp.json), and its desktop shortcut "FlakeIdentifier scan
+(experimental)" with the EXP icon.  Its installed_version.json says channel "experimental": its windows show the EXP
+icon and an orange banner, and only its Update window can choose a branch (main and the exp-* / nightly* branches).
+It never touches the stable program's files or C:/FlakeID/run_flakeid.bat.  One program at a time holds the microscope.
+
 The start screen runs steps 1-4 in a separate Python process (child_command, --result: its progress lines, then a
 RESULT line), so nothing that goes wrong there can end the scan program (2026-10-28: "Python has stopped working"
 after the download, with the update in a thread of the window program).
@@ -45,6 +56,10 @@ CODE_DIRS = ("flakeid", "tools", "docs/scan_guide_images")
 CODE_FILES = ("find_flakes.py", "README.md", "docs/manual.md", "docs/scan_guide.md", "docs/scan_guide.pdf")
 SKIP = ("tools/mm_mock",)                            # (the 2.5 GB Micro-Manager simulator: not on the PC)
 REQUIREMENTS = ("tools/win7/requirements-py38.txt", "tools/win7/requirements-mm-py38.txt")
+STABLE_BRANCH = "main"
+EXP_DIR = "FlakeIdentifier_exp"                     # the experimental program, beside the stable one
+EXP_SHORTCUT = "FlakeIdentifier scan (experimental)"
+EXP_PREFIXES = ("exp-", "nightly")                  # the branches the experimental program's Update window offers
 
 
 class UpdateError(Exception):
@@ -107,11 +122,36 @@ def installed(root=ROOT):
         return {}
 
 
-def latest(s):
-    """The newest commit of update_branch: {sha, date, message}."""
+def experimental(root=ROOT):
+    """Is this the experimental program (installed_version.json channel "experimental")?"""
+    return installed(root).get("channel") == "experimental"
+
+
+def branch_for(s, root=ROOT):
+    """The branch this program follows: update_branch for the stable one; the experimental one, its installed branch."""
+    if experimental(root):
+        return installed(root).get("branch") or STABLE_BRANCH
+    return s.update_branch
+
+
+def latest(s, branch=None):
+    """The newest commit of a branch (default update_branch): {sha, date, message}."""
+    from urllib.parse import quote
     tok = token(s)                                   # (none: fine for a public repository)
-    c = _json(f"repos/{s.update_repo}/commits/{s.update_branch}", tok)
+    c = _json(f"repos/{s.update_repo}/commits/{quote(branch or s.update_branch, safe='')}", tok)
     return dict(sha=c["sha"], date=c["commit"]["committer"]["date"], message=c["commit"]["message"].split("\n")[0])
+
+
+def branches(s):
+    """The branches the experimental program offers: main, then the exp-* / nightly* ones (newest names last)."""
+    tok, names, page = token(s), [], 1
+    while page <= 10:
+        d = _json(f"repos/{s.update_repo}/branches?per_page=100&page={page}", tok)
+        names += [b["name"] for b in d]
+        if len(d) < 100:
+            break
+        page += 1
+    return [STABLE_BRANCH] + sorted(n for n in names if n != STABLE_BRANCH and n.startswith(EXP_PREFIXES))
 
 
 CHECK_EVERY_S = 30 * 60                              # the scan window asks GitHub at the start and then this often
@@ -122,7 +162,7 @@ def available(s, root=ROOT):
     the installed one, else None (also for a git checkout, which git updates).  Raises UpdateError."""
     if (Path(root) / ".git").exists():
         return None
-    new = latest(s)
+    new = latest(s, branch_for(s, root))
     return None if installed(root).get("sha") == new["sha"] else new
 
 
@@ -138,12 +178,20 @@ def news(s, have, new):
     return [(c["sha"], c["commit"]["committer"]["date"], c["commit"]["message"].split("\n")[0]) for c in reversed(d.get("commits") or [])]
 
 
-def check(s, root=ROOT):
-    """What an update would bring: dict(installed, latest, news, up_to_date)."""
+def check(s, root=ROOT, branch=None):
+    """What an update would bring: dict(installed, latest, news, up_to_date, branch, experimental).  branch: only the
+    experimental program chooses one (the stable program follows update_branch)."""
     if (Path(root) / ".git").exists():
         raise UpdateError(f"{root} is a git checkout: update it with git pull")
-    have, new = installed(root), latest(s)
-    return dict(installed=have, latest=new, news=news(s, have.get("sha"), new["sha"]), up_to_date=have.get("sha") == new["sha"])
+    exp = experimental(root)
+    if branch and not exp and branch != s.update_branch:
+        raise UpdateError(f"the stable program follows {s.update_branch}; a branch is tried in the experimental program: "
+                          f"C:\\FlakeID\\run_flakeid.bat update --experimental {branch}")
+    b = branch or branch_for(s, root)
+    have, new = installed(root), latest(s, b)
+    same = have.get("sha") == new["sha"] and (have.get("branch") or b) == b
+    return dict(installed=have, latest=new, news=news(s, have.get("sha"), new["sha"]), up_to_date=same, branch=b,
+                experimental=exp)
 
 
 def download(s, sha, dest, log=print):
@@ -263,7 +311,8 @@ def install(src, info, root=ROOT, log=print):
     src, root = Path(src), Path(root)
     files = _files(src)
     old = installed(root)
-    bdir = root.parent / "update_backups" / (time.strftime("%Y%m%d_%H%M%S") + "_" + (old.get("sha", "kit")[:7]))
+    exp = info.get("channel") == "experimental"
+    bdir = root.parent / ("update_backups_exp" if exp else "update_backups") / (time.strftime("%Y%m%d_%H%M%S") + "_" + (old.get("sha", "kit")[:7]))
     log(f"  backup of the current code: {bdir}")
     for d in CODE_DIRS:
         if (root / d).is_dir():
@@ -290,9 +339,12 @@ def install(src, info, root=ROOT, log=print):
             except OSError:
                 pass
         raise UpdateError(f"the update could not be copied ({e}); the previous version is back") from None
-    bat = root.parent / "run_flakeid.bat"           # (as setup does: the launcher beside the program folder)
-    if bat.is_file() and (src / "tools/win7/run_flakeid.bat").is_file():
+    bat = root.parent / "run_flakeid.bat"           # (as setup does: the launcher beside the program folder; the stable one's)
+    if not exp and bat.is_file() and (src / "tools/win7/run_flakeid.bat").is_file():
         _replace(src / "tools/win7/run_flakeid.bat", bat)
+    ico, exp_ico = root / "flakeid/scope/assets/logo.ico", root / "flakeid/scope/assets/logo_exp.ico"
+    if exp and exp_ico.is_file():                   # (the shortcut and the taskbar show the EXP icon)
+        _replace(exp_ico, ico)
     (root / VERSION_FILE).write_text(json.dumps(dict(info, branch=info.get("branch", ""), installed=time.strftime("%Y-%m-%d %H:%M:%S")),
                                                 indent=1), encoding="utf-8")
     backups = sorted(p for p in bdir.parent.iterdir() if p.is_dir())
@@ -302,13 +354,14 @@ def install(src, info, root=ROOT, log=print):
     return bdir
 
 
-def update(s, log=print, root=ROOT):
-    """Download, check and install the newest version.  Returns the commit installed ({sha, date, message})."""
-    c = check(s, root)
-    new = dict(c["latest"], branch=s.update_branch)
+def update(s, log=print, root=ROOT, branch=None):
+    """Download, check and install the newest version (of `branch`: the experimental program only).  Returns the commit
+    installed ({sha, date, message, branch, channel})."""
+    c = check(s, root, branch)
+    new = dict(c["latest"], branch=c["branch"], channel="experimental" if c["experimental"] else "stable")
     tmp = tempfile.mkdtemp(prefix="flakeid_update_", dir=str(Path(root).parent))
     try:
-        log(f"downloading {s.update_repo} {s.update_branch} at {new['sha'][:7]} ...")
+        log(f"downloading {s.update_repo} {c['branch']} at {new['sha'][:7]} ...")
         src = download(s, new["sha"], tmp, log)
         bad = problems(src, root)
         if bad:
@@ -317,6 +370,31 @@ def update(s, log=print, root=ROOT):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)       # (a file held for a moment on Windows must not fail the update)
     return new
+
+
+def setup_experimental(s, branch, log=print, stable_root=ROOT):
+    """Make or update the experimental program (C:/FlakeID/FlakeIdentifier_exp) from `branch`, and its desktop shortcut.
+    The stable program (stable_root) is not touched; its flat fields are copied over the first time."""
+    stable_root = Path(stable_root)
+    if experimental(stable_root):
+        raise UpdateError("run this from the stable program (C:\\FlakeID\\run_flakeid.bat), not the experimental one")
+    root = stable_root.parent / EXP_DIR
+    new_install = not (root / VERSION_FILE).is_file()
+    root.mkdir(parents=True, exist_ok=True)
+    if new_install and (stable_root / "flats").is_dir() and not (root / "flats").exists():
+        shutil.copytree(str(stable_root / "flats"), str(root / "flats"))
+        log(f"  flat fields copied from {stable_root / 'flats'}")
+    if new_install:                                  # (the channel first: the install below is then an experimental one)
+        (root / VERSION_FILE).write_text(json.dumps(dict(channel="experimental", branch=branch), indent=1), encoding="utf-8")
+    info = update(s, log=log, root=root, branch=branch)
+    if sys.platform == "win32":
+        import subprocess
+        icon = root / "flakeid/scope/assets/logo.ico"
+        r = subprocess.run([python_exe(), str(root / "tools/win7/make_shortcut.py"), "--code", str(root), "--name", EXP_SHORTCUT,
+                            "--icon", str(icon), "--no-pin"], cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        log(r.stdout.decode("utf-8", "replace").strip() or f"  shortcut: exit code {r.returncode}")
+    log(f"experimental program: {root} ({branch} at {info['sha'][:7]}); start it with the \"{EXP_SHORTCUT}\" shortcut")
+    return info
 
 
 def python_exe():
@@ -341,9 +419,11 @@ def restart_command():
 def describe(c):
     """The lines that say what an update would bring (check's result)."""
     have, new = c["installed"], c["latest"]
-    out = [f"Installed: {have['sha'][:7]} ({have.get('date', '?')[:10]}): {have.get('message', '')}" if have.get("sha")
-           else "Installed: not known (installed from a kit)",
-           f"On GitHub: {new['sha'][:7]} ({new['date'][:10]}): {new['message']}"]
+    out = ([f"EXPERIMENTAL program, branch {c.get('branch', '?')} (installed: {have.get('branch') or '?'})"] if c.get("experimental")
+           else [])
+    out += [f"Installed: {have['sha'][:7]} ({have.get('date', '?')[:10]}): {have.get('message', '')}" if have.get("sha")
+            else "Installed: not known (installed from a kit)",
+            f"On GitHub ({c.get('branch', '?')}): {new['sha'][:7]} ({new['date'][:10]}): {new['message']}"]
     if c["up_to_date"]:
         out.append("The program is up to date.")
     elif c["news"]:
@@ -358,13 +438,31 @@ def main(argv=None):
     ap.add_argument("--settings", default=str(ROOT.parent / "scan_settings.json"), help="scan settings (update_repo, update_branch, update_token_file)")
     ap.add_argument("--check", action="store_true", help="only say what an update would bring")
     ap.add_argument("--yes", action="store_true", help="install without asking")
+    ap.add_argument("--branch", help="(the experimental program only) the branch to install")
+    ap.add_argument("--branches", action="store_true", help="list the branches the experimental program offers")
+    ap.add_argument("--experimental", metavar="BRANCH", help="make or update the experimental program "
+                    f"(C:/FlakeID/{EXP_DIR}) from BRANCH, beside this stable one, with its own desktop shortcut")
     ap.add_argument("--result", action="store_true", help="(the start screen) install without asking; the last line is "
                     "RESULT {sha, date, message} or ERROR <why>")
     a = ap.parse_args(argv)
     s = load(a.settings if Path(a.settings).is_file() else None)
+    if a.branches:
+        try:
+            print("\n".join(branches(s)))
+            return 0
+        except UpdateError as e:
+            print(f"NOT LISTED: {e}")
+            return 1
+    if a.experimental:
+        try:
+            setup_experimental(s, a.experimental)
+            return 0
+        except UpdateError as e:
+            print(f"EXPERIMENTAL PROGRAM NOT SET UP: {e}")
+            return 1
     if a.result:
         try:
-            info = update(s, log=lambda m: print(m, flush=True))
+            info = update(s, log=lambda m: print(m, flush=True), branch=a.branch)
             print("RESULT " + json.dumps(info), flush=True)
             return 0
         except UpdateError as e:
@@ -373,13 +471,13 @@ def main(argv=None):
             print(f"ERROR {type(e).__name__}: {e}".replace("\n", " | "), flush=True)
         return 1
     try:
-        c = check(s)
+        c = check(s, branch=a.branch)
         print("\n".join(describe(c)))
         if c["up_to_date"] or a.check:
             return 0
         if not a.yes and input("Install it? [y/N] ").strip().lower() not in ("y", "yes"):
             return 0
-        update(s)
+        update(s, branch=a.branch)
         print("Done: start the scan program again.")
     except UpdateError as e:
         print(f"UPDATE NOT DONE: {e}")

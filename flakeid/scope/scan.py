@@ -31,7 +31,7 @@ import numpy as np
 from .settings import Settings, dump
 from flakeid.fieldmosaic import field_size_um, fmt_matrix, format_poly, parse_poly, plan_fields
 
-VERSION = "py-2026-11-25a"
+VERSION = "py-2026-11-27a"
 NAN = float("nan")
 MANUAL_RETAKE = "Manual focus (retakes)"       # the 100x window's button: a retake focused by hand
 IDX100_HEADER = ("order,label,stage_x_um,stage_y_um,z_um,z_drive,z10_um,offset_um,focus,af_ratio,saturated_frac,file,shift_files,"
@@ -100,6 +100,18 @@ def f1(v): return f"{v:.1f}"
 def f2(v): return f"{v:.2f}"
 def f3(v): return f"{v:.3f}"
 def pad3(v): return f"{int(v):03d}"
+def exp_tag():
+    """", EXPERIMENTAL <branch> <sha>" for the experimental program (update.experimental), else "" (the scan log's version)."""
+    try:
+        from . import update as U
+        if U.experimental():
+            v = U.installed()
+            return f", EXPERIMENTAL {v.get('branch') or '?'} {(v.get('sha') or '')[:7]}"
+    except Exception:
+        pass
+    return ""
+
+
 def safe_name(s): return re.sub(r"[^A-Za-z0-9_.-]", "_", s.strip())
 def isnan(v): return v != v
 
@@ -2812,7 +2824,7 @@ class Scanner:
         if connect is not None:
             connect(self)
         self.setup_devices()
-        self.say(f"chip scan (flakeid.scope {VERSION}): start at {f1(self.X0)}, {f1(self.Y0)} um, field {f1(self.FOVX)} x {f1(self.FOVY)} um")
+        self.say(f"chip scan (flakeid.scope {VERSION}{exp_tag()}): start at {f1(self.X0)}, {f1(self.Y0)} um, field {f1(self.FOVX)} x {f1(self.FOVY)} um")
         self.say(f"  z_scale {self.z_scale} drive units per um (Z in real um from here on)")
         self.say(f"  devices: XY stage '{self.xy}', focus '{self.zdev}', camera '{self.cam}' {self.W} x {self.H} px, "
                  f"{c.getBytesPerPixel()} bytes/px, Z {f1(self.Z0)}")
