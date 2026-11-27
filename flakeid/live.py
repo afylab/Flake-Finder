@@ -93,6 +93,9 @@ def _index(tile: Tile) -> int:
     return int(m.group(1)) if m else -1
 
 
+SKIPPED_TILES = "tiles_skipped.json"     # (written by flakeid.scope.scan: planned tiles beyond the stage's travel)
+
+
 def read_plan(folder: Path) -> dict | None:
     """{(col, row): (x, y)} of the planned tiles, from <NAME>_scan.pos next to <NAME>_tiles[_n]."""
     name = re.sub(r"_tiles(_\d+)?$", "", folder.name)
@@ -400,6 +403,8 @@ class LiveScan:
             self.plan = read_plan(self.folder)
             if self.plan:
                 self.say(f"scan plan: {len(self.plan)} tiles")
+        if self.plan:
+            self.drop_skipped()
         for mdf in self.folder.glob("*/metadata.txt"):
             lbl = mdf.parent.name
             if lbl in self.tiles:
@@ -441,6 +446,28 @@ class LiveScan:
     @staticmethod
     def _label(g):
         return f"Pos-{g[0]:03d}_{g[1]:03d}"
+
+    def drop_skipped(self):
+        """Planned tiles the microscope could not reach (beyond the stage's travel, met during the scan: listed in
+        tiles_skipped.json in the tile folder) are taken out of the plan, so the piece completes without them
+        (2026-11-27)."""
+        f = self.folder / SKIPPED_TILES
+        try:
+            mt = f.stat().st_mtime
+        except OSError:
+            return
+        if mt == getattr(self, "_skipped_mt", None):
+            return
+        try:
+            labels = set(json.loads(f.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            return
+        self._skipped_mt = mt
+        gone = [g for g in self.plan if self._label(g) in labels and self._label(g) not in self.tiles]
+        for g in gone:
+            del self.plan[g]
+        if gone:
+            self.say(f"{len(gone)} planned tile(s) beyond the stage's travel left out by the microscope: not analysed")
 
     def grids(self):
         return set(self.plan) if self.plan is not None else {t.grid for t in self.tiles.values()}

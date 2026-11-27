@@ -31,7 +31,7 @@ import numpy as np
 from .settings import Settings, dump
 from flakeid.fieldmosaic import field_size_um, fmt_matrix, format_poly, parse_poly, plan_fields
 
-VERSION = "py-2026-11-27b"
+VERSION = "py-2026-11-27d"
 NAN = float("nan")
 MANUAL_RETAKE = "Manual focus (retakes)"       # the 100x window's button: a retake focused by hand
 IDX100_HEADER = ("order,label,stage_x_um,stage_y_um,z_um,z_drive,z10_um,offset_um,focus,af_ratio,saturated_frac,file,shift_files,"
@@ -607,6 +607,27 @@ def image_name(chip, label, kind, k, prefix=""):
     return f"{safe_name(chip)}_{rest}_{kind}{'_' + pre if pre else ''}_{int(k):03d}.tif"
 
 
+SKIPPED_TILES = "tiles_skipped.json"     # (in a tile folder: tiles beyond the stage's travel, not scanned; flakeid.live)
+
+
+def write_text_safe(path, txt):
+    """Write a small file via .tmp + rename, retried (Windows: virus scanner, indexer), then directly; UTF-8.  Never
+    raises: returns the error text, or None."""
+    tmp = Path(str(path) + ".tmp")
+    for _ in range(10):
+        try:
+            tmp.write_text(txt, encoding="utf-8")
+            os.replace(str(tmp), str(path))
+            return None
+        except OSError:
+            time.sleep(0.3)
+    try:
+        Path(path).write_text(txt, encoding="utf-8")
+        return None
+    except OSError as e:
+        return str(e)
+
+
 def write_rows(path, cols, rows):
     tmp = Path(str(path) + ".tmp")
     with open(tmp, "w", newline="") as fh:
@@ -1167,6 +1188,16 @@ class Scanner:
             c.waitForDevice(self.zdev)
         self.t_moved = time.perf_counter()
         self.op("stage moves (XY)", t_op)
+
+    def try_move(self, x, y, what, **kw):
+        """move_to, but a place beyond the stage's travel (StageLimit) is logged and left out: False then.  A stage limit
+        is never a reason to stop the scan (2026-11-27: a limit met at a 10x focus point ended a run 40 min in)."""
+        try:
+            self.move_to(x, y, **kw)
+            return True
+        except StageLimit as e:
+            self.say(f"  {what}: beyond the stage's travel ({e}): skipped")
+            return False
 
     # ---- the stage's travel (stage_limits_um, and limits learned when the stage stopped short at one)
     def stage_box(self):
@@ -4834,9 +4865,6 @@ class Scanner:
             self.say(f"==== piece {pi + 1} of {len(self.pieces)}: {s.name}, centre {f1(cc[0])}, {f1(cc[1])} um, Z {f1(cc[2])}, "
                      f"{self.material} on {f1(self.oxide)} nm oxide")
             self.X0, self.Y0, self.Z0 = cc
-            self.move_to(self.X0, self.Y0)
-            if self.has_z:
-                self.set_z(self.Z0 - s.af_backlash_um); self.set_z(self.Z0)
             pc["state"] = "scanning"
             self.write_manifest(self.manifest, self.pieces, "scanning")
         self.fa = self.fb = 0.0
@@ -4844,6 +4872,9 @@ class Scanner:
         self.FQ = self.FS = None
         try:
             if s.mode == "multi":
+                self.move_to(self.X0, self.Y0)
+                if self.has_z:
+                    self.set_z(self.Z0 - s.af_backlash_um); self.set_z(self.Z0)
                 self.check_exposure(s.auto_exposure)
             try:
                 self.plan_and_scan(pc)
@@ -4851,10 +4882,12 @@ class Scanner:
                 if pc.get("polygon"):
                     self.move_box = None                # (a polygon's box: only for its own scan)
             pc["state"] = "scanned"
-        except Stop as e:
+        except (Stop, StageLimit) as e:
+            # (StageLimit is not a Stop: one that got this far used to end the whole run; now only this piece ends)
             if s.mode != "multi" or self.stop_all:
                 raise
-            self.say(f"  piece {s.name} FAILED: {e}  (going on with the next piece)")
+            what = "beyond the stage's travel: " if isinstance(e, StageLimit) else ""
+            self.say(f"  piece {s.name} FAILED: {what}{e}  (going on with the next piece)")
             pc["state"] = "failed"
         self.piece_focus.append(((self.fa, self.fb, self.fc), self.FQ))
         self.__dict__.setdefault("piece_surface", {})[pi] = self.FS
@@ -5316,7 +5349,8 @@ class Scanner:
             for k, (qx, qy) in enumerate(fq):
                 self.pause_point()
                 qx, qy = self.clamp_reach(qx, qy)          # (a chip partly beyond the stage's travel: focused within it)
-                self.move_to(qx, qy)
+                if not self.try_move(qx, qy, f"focus point {k + 1}"):
+                    continue
                 if fpts:
                     self.set_z(self.predict_z(qx, qy, fpts, None, self.Z0))
                 if fmode == "auto":
@@ -5338,7 +5372,8 @@ class Scanner:
                                 qx, qy = qx + (ccx - qx) / dd * st, qy + (ccy - qy) / dd * st
                             else:
                                 qx, qy = qx + (ccx - qx) * 0.12, qy + (ccy - qy) * 0.12
-                            self.move_to(qx, qy)
+                            if not self.try_move(qx, qy, f"focus point {k + 1} (again further in)"):
+                                break
                         ok = self.autofocus(zguess, s.af10)[2]
                     if not ok:
                         self.say(f"  focus point {k + 1}: autofocus failed, point skipped")
@@ -5360,8 +5395,7 @@ class Scanner:
                             self.say(f"  focus point {k + 1}: Z {f1(zf)} is {f1(off)} um off the other points (tape, debris?): "
                                      "again further in")
                             q2 = self.focus_spot(k, qx + (ccx - qx) * 0.25, qy + (ccy - qy) * 0.25, ccx, ccy)
-                            if q2 is not None:
-                                self.move_to(*q2)
+                            if q2 is not None and self.try_move(q2[0], q2[1], f"focus point {k + 1} (further in)"):
                                 self.set_z(pl0[0] * q2[0] + pl0[1] * q2[1] + pl0[2])
                                 r2 = self.autofocus(self.z_read(), s.af10)
                                 if r2[2]:
@@ -5396,8 +5430,7 @@ class Scanner:
                     ex = (1 - uu) * (1 - vv) * C[2, 0] + uu * (1 - vv) * C[3, 0] + uu * vv * C[0, 0] + (1 - uu) * vv * C[1, 0]
                     ey = (1 - uu) * (1 - vv) * C[2, 1] + uu * (1 - vv) * C[3, 1] + uu * vv * C[0, 1] + (1 - uu) * vv * C[1, 1]
                     q2 = self.focus_spot(len(fpts), ex, ey, ccx, ccy)
-                    if q2 is not None:
-                        self.move_to(*q2)
+                    if q2 is not None and self.try_move(q2[0], q2[1], "focus point (extra)"):
                         self.set_z(self.predict_z(q2[0], q2[1], fpts, None, self.Z0))
                         if self.autofocus(self.z_read(), s.af10)[2]:
                             fpts.append((q2[0], q2[1], self.z_read()))
@@ -5515,8 +5548,7 @@ class Scanner:
             self.draw_plan(tiles, corners, pts, fpts, sizeX, sizeY, rot, cx, cy, minx, maxx, miny, maxy)
         except Exception as e:
             self.say(f"  (plan image not drawn: {e})")
-        self.move_to(self.X0, self.Y0)
-        if self.has_z:
+        if self.try_move(self.X0, self.Y0, "back to the piece centre") and self.has_z:
             self.z_write(self.z_at(self.X0, self.Y0)); self.core.waitForDevice(self.zdev)
 
         if s.run_scan:
@@ -5538,21 +5570,39 @@ class Scanner:
             self._props = None
             ref = self.Z0 if isnan(self.zref) else self.zref
             nrb = max(1, int(s.tile_readback_every or 1))
+            # the box of tile positions read back so far: a tile beyond it is read back too, so a stage limit not known
+            # yet is found on the tile that meets it (its stage stops short there), not taken as reached
+            vb = [self.X0, self.X0, self.Y0, self.Y0]
+            skipped = []
             for i, t in enumerate(tiles):
                 self.ui.check_stop(self)
                 self.pause_point()
                 zpre = t[4] - s.af_backlash_um
+                lbl = f"Pos-{pad3(t[2])}_{pad3(t[3])}"
                 # the position read back on every nrb-th tile, the first and the last (the others as sent: a stage that
                 # stops arriving is still caught within nrb tiles; positions agree with the readback to ~0.1 um)
-                chk = i % nrb == 0 or i == len(tiles) - 1
-                if self.has_z and s.overlap_z_move and abs(zpre - ref) <= s.max_dz_um:
-                    self.move_to(t[0], t[1], z_pre=zpre, check=chk)        # backlash approach during the XY move
-                    self.set_z(t[4])
-                else:
-                    self.move_to(t[0], t[1], check=chk)
-                    if self.has_z:
-                        self.set_z(zpre); self.set_z(t[4])
-                lbl = f"Pos-{pad3(t[2])}_{pad3(t[3])}"
+                chk = (i % nrb == 0 or i == len(tiles) - 1 or t[0] < vb[0] - 1.0 or t[0] > vb[1] + 1.0
+                       or t[1] < vb[2] - 1.0 or t[1] > vb[3] + 1.0)
+                try:
+                    if self.has_z and s.overlap_z_move and abs(zpre - ref) <= s.max_dz_um:
+                        self.move_to(t[0], t[1], z_pre=zpre, check=chk)        # backlash approach during the XY move
+                        self.set_z(t[4])
+                    else:
+                        self.move_to(t[0], t[1], check=chk)
+                        if self.has_z:
+                            self.set_z(zpre); self.set_z(t[4])
+                except StageLimit as e:
+                    # (2026-11-27: beyond the stage's travel: the tile is left out, the scan goes on; the analysis is
+                    # told (tiles_skipped.json) so it does not wait for it)
+                    skipped.append(lbl)
+                    if len(skipped) <= 3:
+                        self.say(f"    tile {lbl}: beyond the stage's travel ({e}): left out")
+                    err = write_text_safe(scan_dir / SKIPPED_TILES, json.dumps(skipped))
+                    if err:
+                        self.say(f"    (tile skip list not written: {err})")
+                    continue
+                if chk:
+                    vb = [min(vb[0], t[0]), max(vb[1], t[0]), min(vb[2], t[1]), max(vb[3], t[1])]
                 self.save_tile(scan_dir / lbl, i, lbl, t[2], t[3], background=s.background_save, cached=True if chk else "sent")
                 if (i + 1) % 25 == 0 or i == len(tiles) - 1:
                     el = time.time() - t0
@@ -5562,8 +5612,10 @@ class Scanner:
                 t_w = time.time()
                 self.writer.flush()                     # (raises if a write failed)
                 self.op("waiting for the tile writer", t_w)
-            self.move_to(self.X0, self.Y0)
-            if self.has_z:
+            if skipped:
+                self.say(f"  {len(skipped)} of {len(tiles)} tiles beyond the stage's travel left out (move the chip towards "
+                         "the stage's centre to scan them)")
+            if self.try_move(self.X0, self.Y0, "back to the piece centre") and self.has_z:
                 self.set_z(self.z_at(self.X0, self.Y0))
             self.say(f"  scan finished: {scan_dir}  ({f1((time.time() - t0) / max(len(tiles), 1))} s per tile)")
         else:
@@ -8099,7 +8151,11 @@ class Scanner:
                     self.say(f"  piece {cur} -> {ddir}")
                 dx, dy = q[0] + off_xy[0], q[1] + off_xy[1]
                 self.say(f"  [{k + 1}/{len(self.domain_list)}] {lab} ({f1(q[3])} nm) at {f1(dx)}, {f1(dy)}")
-                self.approach_to(dx, dy)
+                try:
+                    self.approach_to(dx, dy)
+                except StageLimit as ex:
+                    self.say(f"    beyond the stage's travel ({ex}): skipped")
+                    continue
                 offk = idw_offset(dx, dy, dom_offs) if dom_offs else s.domain_focus_offset_um
                 known = not isnan(offk)
                 zg = q[2] + (offk if known else 0.0)
